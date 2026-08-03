@@ -8,6 +8,11 @@ on:
   push:
     branches: [main]
 
+# 新推送自动取消还在跑的旧构建（节省时间/配额，保证 APK 用最新代码）
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
