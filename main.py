@@ -85,12 +85,6 @@ class TaskApp:
     def _setup(self):
         p = self.page
         p.title = APP_NAME
-        try:
-            p.set_allowed_device_orientations(
-                [ft.DeviceOrientation.PORTRAIT_UP, ft.DeviceOrientation.PORTRAIT_DOWN]
-            )
-        except Exception:
-            pass
         p.theme_mode = ft.ThemeMode.LIGHT
         p.theme = ft.Theme(color_scheme_seed=ft.Colors.INDIGO)
         p.padding = 0
@@ -616,7 +610,14 @@ class TaskApp:
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
-def main(page: ft.Page):
+async def main(page: ft.Page):
+    # 锁定竖屏（async 方法需 await）
+    try:
+        await page.set_allowed_device_orientations(
+            [ft.DeviceOrientation.PORTRAIT_UP, ft.DeviceOrientation.PORTRAIT_DOWN]
+        )
+    except Exception:
+        pass
     TaskApp(page)
 
 
