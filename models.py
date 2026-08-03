@@ -334,3 +334,35 @@ class Database:
                         it.get("created_at", ""),
                     ),
                 )
+
+    def import_plan(self, text: str) -> int:
+        """从外部「导入计划」：把文件里的任务树【追加】进来，不覆盖现有数据。
+
+        文件里的根项目变成新的顶层项目，子项目挂回对应父项目下；
+        所有 id 重新分配，与现有数据无冲突。返回导入的条目数。
+        """
+        data = json.loads(text)
+        if data.get("app") != "daily_tasks":
+            raise ValueError("不是本应用的备份/计划文件")
+        id_map = {}
+        count = 0
+        with self._conn() as c:
+            for it in data.get("items", []):
+                title = str(it.get("title", "")).strip()
+                if not title:
+                    continue
+                new_id = c.execute(
+                    "INSERT INTO items(parent_id,title,deadline,done,created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (
+                        id_map.get(it.get("parent_id")),
+                        title,
+                        it.get("deadline", ""),
+                        1 if it.get("done") else 0,
+                        it.get("created_at")
+                        or dt.datetime.now().isoformat(timespec="seconds"),
+                    ),
+                ).lastrowid
+                id_map[it["id"]] = new_id
+                count += 1
+        return count

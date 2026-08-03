@@ -715,8 +715,15 @@ class TaskApp:
                         on_click=self._export,
                     ),
                     ft.ListTile(
-                        leading=ft.Icon(ft.Icons.UPLOAD),
-                        title=ft.Text("导入备份"),
+                        leading=ft.Icon(ft.Icons.PLAYLIST_ADD),
+                        title=ft.Text("导入计划"),
+                        subtitle=ft.Text("从文件追加任务，不覆盖现有", size=11),
+                        on_click=self._import_plan,
+                    ),
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.UPLOAD_FILE),
+                        title=ft.Text("导入备份（覆盖现有）"),
+                        subtitle=ft.Text("整体还原备份，会替换全部任务", size=11),
                         on_click=self._import,
                     ),
                     ft.ListTile(
@@ -784,6 +791,36 @@ class TaskApp:
             self.stack = []
             self._render()
             self._toast("备份已导入")
+        except Exception as ex:
+            self._toast(f"导入失败：{ex}")
+
+    def _import_plan(self, e):
+        """从外部导入计划：追加为新项目，不覆盖现有任务。"""
+        self.page.pop_dialog()
+        try:
+            files = self.file_picker.pick_files(
+                dialog_title="选择计划文件", allowed_extensions=["json"]
+            )
+        except Exception as ex:
+            self._toast(f"导入失败：{ex}")
+            return
+        if not files:
+            self._toast("已取消")
+            return
+        fp = files[0]
+        try:
+            text = None
+            b = getattr(fp, "bytes", None)
+            if b:
+                text = b.decode("utf-8")
+            elif getattr(fp, "path", None):
+                with open(fp.path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            if not text:
+                raise ValueError("文件为空")
+            n = self.db.import_plan(text)
+            self._render()
+            self._toast(f"已导入计划：追加 {n} 个任务，原有数据未改动")
         except Exception as ex:
             self._toast(f"导入失败：{ex}")
 

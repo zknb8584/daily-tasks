@@ -8,6 +8,7 @@
 """
 import base64
 import datetime as dt
+import json
 import os
 import tempfile
 
@@ -231,6 +232,27 @@ def main():
     # ---- 清理每日一句 ----
     appmod.save_quotes("")
     assert appmod.get_quotes() == []
+
+    # ---- 导入计划：追加不覆盖 ----
+    plan = json.dumps({
+        "app": "daily_tasks", "version": 1,
+        "items": [
+            {"id": 1, "parent_id": None, "title": "导入项目A", "deadline": "", "done": 0, "created_at": "2026-08-01T00:00:00"},
+            {"id": 2, "parent_id": 1, "title": "导入子任务", "deadline": "2026-08-10", "done": 0, "created_at": "2026-08-01T00:00:00"},
+        ],
+    })
+    before_roots = len(db.roots())
+    n = db.import_plan(plan)
+    assert n == 2, n
+    assert len(db.roots()) == before_roots + 1  # 原有顶层项目保留，新增一个
+    imp = [r for r in db.roots() if r["title"] == "导入项目A"][0]
+    assert len(db.children(imp["id"])) == 1
+    assert db.children(imp["id"])[0]["deadline"] == "2026-08-10"
+
+    # ---- 导入计划 UI 回调：走 FakePage 不真正弹选择器，只验证方法存在性路径 ----
+    app._render()
+    texts = rendered_texts(app)
+    assert any("导入项目A" in t for t in texts), texts
 
     print("UI TEST OK")
 
