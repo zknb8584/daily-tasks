@@ -6,11 +6,13 @@
 
 运行：python ui_test.py
 """
+import asyncio
 import base64
 import datetime as dt
 import json
 import os
 import tempfile
+import types
 
 import flet as ft
 
@@ -23,6 +25,30 @@ class FakeEvent:
         self.control = control
 
 
+class FakeRegistry:
+    """模拟 page._services：记录注册的服务。"""
+
+    def __init__(self):
+        self.services = []
+
+    def register_service(self, svc):
+        self.services.append(svc)
+
+
+class FakePicker:
+    """模拟 async FilePicker：pick_files/save_file 返回固定结果。"""
+
+    def __init__(self, files=None, path=None):
+        self.files = files or []
+        self.path = path
+
+    async def pick_files(self, **kw):
+        return self.files
+
+    async def save_file(self, **kw):
+        return self.path
+
+
 class FakePage:
     def __init__(self):
         self.title = ""
@@ -32,6 +58,7 @@ class FakePage:
         self.width = None
         self.height = None
         self.overlay = []
+        self._services = FakeRegistry()
         self.appbar = None
         self.floating_action_button = None
         self.on_keyboard_event = None
@@ -55,7 +82,7 @@ class FakePage:
         self.pop_count += 1
 
 
-CONTAINER_ATTRS = ("controls", "content", "title", "subtitle", "leading", "trailing", "actions")
+CONTAINER_ATTRS = ("controls", "content", "title", "subtitle", "leading", "trailing", "actions", "items")
 
 
 def collect_text(control, out):
@@ -111,12 +138,19 @@ def main():
     assert pg.theme is not None and pg.theme.color_scheme_seed == ft.Colors.BLUE
     assert pg.appbar.bgcolor == ft.Colors.BLUE_800
 
+    # ---- FilePicker 应注册为服务（非 overlay 渲染，避免红框） ----
+    assert len(pg._services.services) == 1, pg._services.services
+    assert pg.overlay == [], pg.overlay
+    assert isinstance(pg._services.services[0], ft.FilePicker)
+
     # ---- 渲染：主列表应有 A、C；已完成区应有 B ----
     texts = rendered_texts(app)
     assert any("大项目A" in t for t in texts), texts
     assert any("过期项目C" in t for t in texts), texts
     assert any("已完成 (1)" in t for t in texts), texts
     assert any("进度 1/2" in t for t in texts), texts
+    # 行内 ⋯ 菜单含「添加子项目」
+    assert any("添加子项目" in t for t in texts), texts
 
     # ---- 每日一句：根界面顶部显示卡片，点一下换一句 ----
     assert any("每日一句" in t for t in texts), texts
@@ -253,6 +287,36 @@ def main():
     app._render()
     texts = rendered_texts(app)
     assert any("导入项目A" in t for t in texts), texts
+
+    # ---- async 文件处理器：用 FakePicker 桩 + asyncio.run 覆盖 4 条路径 ----
+    # 导出备份
+    out = os.path.join(tmp, "out.json")
+    app.file_picker = FakePicker(path=out)
+    asyncio.run(app._export(None))
+    assert os.path.exists(out)
+    assert json.load(open(out, encoding="utf-8"))["app"] == "daily_tasks"
+
+    # 导入计划（追加）
+    plan_file = os.path.join(tmp, "plan.json")
+    with open(plan_file, "w", encoding="utf-8") as f:
+        f.write(plan)
+    before = len(db.roots())
+    app.file_picker = FakePicker(files=[types.SimpleNamespace(path=plan_file, bytes=None)])
+    asyncio.run(app._import_plan(None))
+    assert len(db.roots()) == before + 1
+
+    # 导入备份（覆盖）
+    backup_data = json.load(open(out, encoding="utf-8"))
+    backup_roots = {it["title"] for it in backup_data["items"] if it["parent_id"] is None}
+    app.file_picker = FakePicker(files=[types.SimpleNamespace(path=out, bytes=None)])
+    asyncio.run(app._import(None))
+    assert {r["title"] for r in db.roots()} == backup_roots
+
+    # 设置背景图
+    app.file_picker = FakePicker(files=[types.SimpleNamespace(path=img, bytes=None)])
+    asyncio.run(app._set_bg_image(None))
+    assert db.get_bg_image() is not None
+    db.clear_bg_image()
 
     print("UI TEST OK")
 

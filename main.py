@@ -145,7 +145,12 @@ class TaskApp:
                 pass
 
         self.file_picker = ft.FilePicker()
-        p.overlay.append(self.file_picker)
+        # 0.86 起 FilePicker 是 Service：注册为前端服务绑定（不渲染），
+        # 不能加进 overlay/控件树，否则客户端会渲染成红色 Unknown control 框
+        try:
+            self.page._services.register_service(self.file_picker)
+        except Exception:
+            pass
 
         p.appbar = ft.AppBar(
             leading=None,
@@ -259,103 +264,148 @@ class TaskApp:
             ),
         )
 
-    # ================= 列表行 =================
+    # ================= 列表行（卡片式） =================
     def _item_row(self, it, in_completed=False):
         item_id = it["id"]
         done = bool(it["done"])
         has_children = self.db.has_children(item_id)
 
+        # 标题
         title_style = None
         if done:
             title_style = ft.TextStyle(
                 decoration=ft.TextDecoration.LINE_THROUGH, color=ft.Colors.GREY
             )
         title = ft.Text(
-            it["title"], size=16, style=title_style,
+            it["title"], size=16, weight=ft.FontWeight.W_500, style=title_style,
             max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
         )
 
-        subs = []
+        # 元信息行：截止时间胶囊 + 进度
+        meta = []
         if it["deadline"]:
             overdue = False
             d = parse_deadline(it["deadline"])
             if d is not None and d < dt.datetime.now():
                 overdue = True
-            subs.append(
-                ft.Text(
-                    fmt_deadline(it["deadline"]),
-                    size=12,
-                    color=self._deadline_color(it["deadline"]),
-                    weight=ft.FontWeight.BOLD if overdue else None,
+            dl_color = self._deadline_color(it["deadline"])
+            meta.append(
+                ft.Container(
+                    padding=ft.Padding(left=8, right=8, top=2, bottom=2),
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.14, dl_color),
+                    content=ft.Text(
+                        fmt_deadline(it["deadline"]),
+                        size=11, color=dl_color,
+                        weight=ft.FontWeight.BOLD if overdue else None,
+                    ),
                 )
             )
         if has_children:
-            d, t = self.db.subtree_stats(item_id)
-            subs.append(ft.Text(f"进度 {d}/{t}", size=12, color=ft.Colors.GREY))
-        subtitle = ft.Row(subs, spacing=10) if subs else None
+            dd, tt = self.db.subtree_stats(item_id)
+            meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
+        meta_row = ft.Row(meta, spacing=8) if meta else None
 
-        trailing = []
+        # ⋯ 菜单：添加子项目 / 进入子项目 / 编辑 / 删除
+        menu_items = [
+            ft.PopupMenuItem(
+                content=ft.Text("添加子项目"),
+                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
+                on_click=lambda e, i=item_id: self._open_edit(parent_id=i),
+            )
+        ]
         if has_children:
-            trailing.append(
-                ft.IconButton(
-                    icon=ft.Icons.CHEVRON_RIGHT, icon_size=22,
-                    tooltip="进入子项目",
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text("进入子项目"),
+                    icon=ft.Icons.CHEVRON_RIGHT,
                     on_click=lambda e, i=item_id: self._enter_children(i),
                 )
             )
         if in_completed:
-            trailing.append(
-                ft.IconButton(
-                    icon=ft.Icons.UNDO, icon_size=22, tooltip="恢复",
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text("恢复"),
+                    icon=ft.Icons.UNDO,
                     on_click=lambda e, i=item_id: self._restore(i),
                 )
             )
         else:
-            trailing.append(
-                ft.IconButton(
-                    icon=ft.Icons.EDIT, icon_size=22, tooltip="编辑",
+            menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Text("编辑"),
+                    icon=ft.Icons.EDIT,
                     on_click=lambda e, i=item_id: self._open_edit(i),
                 )
             )
-        trailing.append(
-            ft.IconButton(
-                icon=ft.Icons.DELETE, icon_size=22, tooltip="删除",
+        menu_items.append(
+            ft.PopupMenuItem(
+                content=ft.Text("删除"),
+                icon=ft.Icons.DELETE,
                 on_click=lambda e, i=item_id: self._confirm_delete(i),
             )
         )
 
-        return ft.ListTile(
-            leading=ft.Checkbox(
-                value=done,
-                active_color=ft.Colors.PRIMARY,
-                on_change=lambda e, i=item_id: self._on_toggle(e, i),
+        # 卡片
+        return ft.Container(
+            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+            padding=ft.Padding(left=6, right=4, top=6, bottom=6),
+            border_radius=12,
+            bgcolor=ft.Colors.WHITE,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.LIGHT_BLUE_100)),
+            shadow=ft.BoxShadow(
+                blur_radius=4,
+                color=ft.Colors.with_opacity(0.06, ft.Colors.BLUE_GREY_700),
+                offset=ft.Offset(0, 1),
             ),
-            title=title,
-            subtitle=subtitle,
-            trailing=ft.Row(trailing, spacing=0),
-            min_height=64,
-            bgcolor=ft.Colors.GREY_200 if in_completed else None,
-            on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
-            on_long_press=lambda e, i=item_id: self._open_edit(i),
+            opacity=0.6 if done else 1.0,
+            content=ft.Row(
+                [
+                    ft.Checkbox(
+                        value=done,
+                        active_color=ft.Colors.PRIMARY,
+                        on_change=lambda e, i=item_id: self._on_toggle(e, i),
+                    ),
+                    ft.Container(
+                        expand=True,
+                        on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
+                        on_long_press=lambda e, i=item_id: self._open_edit(i),
+                        content=ft.Column(
+                            [title, meta_row] if meta_row else [title],
+                            spacing=4,
+                        ),
+                    ),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT,
+                        icon_color=ft.Colors.BLUE_GREY_600,
+                        tooltip="更多操作",
+                        items=menu_items,
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
 
     def _completed_header(self, count):
-        return ft.ListTile(
-            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.TEAL),
-            title=ft.Text(
-                f"已完成 ({count})", weight=ft.FontWeight.BOLD, color=ft.Colors.GREY
-            ),
-            trailing=ft.Row(
+        return ft.Container(
+            margin=ft.Margin(left=16, right=12, top=10, bottom=2),
+            content=ft.Row(
                 [
+                    ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
+                    ft.Text(
+                        f"已完成 ({count})",
+                        size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_GREY_600,
+                    ),
+                    ft.Container(expand=True),
                     ft.TextButton("清除全部", on_click=self._clear_completed),
                     ft.Icon(
                         ft.Icons.EXPAND_LESS if self._completed_open else ft.Icons.EXPAND_MORE,
-                        color=ft.Colors.GREY,
+                        size=18, color=ft.Colors.BLUE_GREY_600,
                     ),
                 ],
-                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=6,
             ),
-            bgcolor=ft.Colors.GREY_200,
             on_click=lambda e: self._toggle_completed(),
         )
 
@@ -638,10 +688,10 @@ class TaskApp:
             self._bg_overlay.bgcolor = ft.Colors.WHITE
         self.page.update()
 
-    def _set_bg_image(self, e):
+    async def _set_bg_image(self, e):
         self.page.pop_dialog()
         try:
-            files = self.file_picker.pick_files(
+            files = await self.file_picker.pick_files(
                 dialog_title="选择背景图片",
                 file_type=ft.FilePickerFileType.IMAGE,
                 with_data=True,
@@ -739,12 +789,12 @@ class TaskApp:
         )
         self.page.show_dialog(dlg)
 
-    def _export(self, e):
+    async def _export(self, e):
         self.page.pop_dialog()
         data = self.db.export().encode("utf-8")
         fname = f"每日任务备份_{dt.datetime.now():%Y%m%d_%H%M}.json"
         try:
-            path = self.file_picker.save_file(
+            path = await self.file_picker.save_file(
                 dialog_title="导出备份",
                 file_name=fname,
                 allowed_extensions=["json"],
@@ -764,10 +814,10 @@ class TaskApp:
             pass
         self._toast("备份已导出")
 
-    def _import(self, e):
+    async def _import(self, e):
         self.page.pop_dialog()
         try:
-            files = self.file_picker.pick_files(
+            files = await self.file_picker.pick_files(
                 dialog_title="选择备份文件", allowed_extensions=["json"]
             )
         except Exception as ex:
@@ -794,11 +844,11 @@ class TaskApp:
         except Exception as ex:
             self._toast(f"导入失败：{ex}")
 
-    def _import_plan(self, e):
+    async def _import_plan(self, e):
         """从外部导入计划：追加为新项目，不覆盖现有任务。"""
         self.page.pop_dialog()
         try:
-            files = self.file_picker.pick_files(
+            files = await self.file_picker.pick_files(
                 dialog_title="选择计划文件", allowed_extensions=["json"]
             )
         except Exception as ex:
