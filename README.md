@@ -93,7 +93,7 @@ flet build apk ^
   --bundle-id com.example.daily_tasks ^
   --build-version 1.0.0 ^
   --build-number 1 ^
-  --android-permissions android.permission.POST_NOTIFICATIONS android.permission.VIBRATE ^
+  --android-permissions android.permission.POST_NOTIFICATIONS=true android.permission.VIBRATE=true ^
   --android-adaptive-icon-background "#3F51B5" ^
   --arch arm64-v8a
 ```
