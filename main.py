@@ -11,6 +11,8 @@
       已完成但子树未完工      -> 主列表划线沉底
       已完成且整棵子树完工    -> 本层「已完成」折叠区，可恢复/清除
   - 本地通知（应用存活时）：到期/过期扫描 + 打开时补发
+  - 每日一句：用户自写句子，打开 App 随机显示一条（点击换一句）
+  - 自定义背景图：从相册选一张作为背景（可选 Pillow 缩放，无则原图）
   - 数据存 SQLite（应用私有目录），离线可用
   - 备份导出 / 导入（JSON）
 
@@ -18,13 +20,16 @@
   python main.py             # 桌面调试
   python main.py --selftest  # 无界面自检（数据层 + 通知 + 备份）
 """
+import base64
 import datetime as dt
+import io
 import os
+import random
 import sys
 
 import flet as ft
 
-from models import DATA_DIR, Database, fmt_deadline, parse_deadline
+from models import DATA_DIR, Database, fmt_deadline, get_quotes, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
 APP_NAME = "每日任务"
@@ -59,6 +64,47 @@ class DeadlineState:
 
 
 # ---------------------------------------------------------------------------
+# 图片 → base64 data URI（背景图用，跨桌面/安卓最稳）
+# ---------------------------------------------------------------------------
+def _image_to_data_uri(path) -> str | None:
+    """读图并转成 data URI。本机有 Pillow 则缩到最长边 1280px 再编码，
+    否则直接用原图 base64（稍重但功能可用）。失败返回 None。"""
+    data = None
+    mime = "image/jpeg"
+    try:
+        from PIL import Image as PILImage, ImageOps  # Pillow 可选
+
+        im = PILImage.open(path)
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail((1280, 1280))
+        buf = io.BytesIO()
+        if im.mode in ("RGBA", "LA", "P"):
+            im.convert("RGBA").save(buf, format="PNG")
+            mime = "image/png"
+        else:
+            im.convert("RGB").save(buf, format="JPEG", quality=82)
+        data = buf.getvalue()
+    except Exception:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            head = data[:12]
+            if head[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif head[:3] == b"\xff\xd8\xff":
+                mime = "image/jpeg"
+            elif head[:6] in (b"GIF87a", b"GIF89a"):
+                mime = "image/gif"
+            else:
+                mime = "image/webp"
+        except OSError:
+            return None
+    if not data:
+        return None
+    return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+
+
+# ---------------------------------------------------------------------------
 # 主应用
 # ---------------------------------------------------------------------------
 class TaskApp:
@@ -75,8 +121,11 @@ class TaskApp:
         self._title_field = None
         self._dl_state = DeadlineState()
         self._dl_label = ft.Text("未设置截止时间", size=13, color=ft.Colors.GREY)
+        self._quote = None              # 每日一句（随机选的）
 
         self._setup()
+        self._apply_background()
+        self._pick_quote()
         self._render()
         self.notifier.scan()            # 打开 App 时补发
         self.notifier.start(interval=600)
@@ -86,7 +135,7 @@ class TaskApp:
         p = self.page
         p.title = APP_NAME
         p.theme_mode = ft.ThemeMode.LIGHT
-        p.theme = ft.Theme(color_scheme_seed=ft.Colors.INDIGO)
+        p.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)  # 冷静蓝主题
         p.padding = 0
         if sys.platform.startswith(("win", "linux")):  # 桌面调试时用手机竖屏比例窗口
             try:
@@ -103,7 +152,7 @@ class TaskApp:
             leading_width=48,
             title=ft.Text(APP_NAME),
             center_title=True,
-            bgcolor=ft.Colors.PRIMARY,
+            bgcolor=ft.Colors.BLUE_800,
             color=ft.Colors.ON_PRIMARY,
             actions=[
                 ft.IconButton(
@@ -115,12 +164,24 @@ class TaskApp:
             ],
         )
 
+        # 主体：背景图（可选）放在最底层，内容层叠一块半透明白遮罩保证可读性
         self.scroll = ft.Column(spacing=0, scroll=ft.ScrollMode.AUTO, expand=True)
-        p.add(self.scroll)
+        self._bg_overlay = ft.Container(
+            content=self.scroll,
+            bgcolor=ft.Colors.WHITE,
+            expand=True,
+        )
+        self._bg_root = ft.Container(
+            content=self._bg_overlay,
+            expand=True,
+            image=None,
+        )
+        p.add(self._bg_root)
 
         p.floating_action_button = ft.FloatingActionButton(
             icon=ft.Icons.ADD,
             tooltip="新建项目",
+            bgcolor=ft.Colors.BLUE_800,
             on_click=self._on_add,
         )
         p.on_keyboard_event = self._on_key
@@ -148,6 +209,10 @@ class TaskApp:
         self._completed_ids = [it["id"] for it in completed]
 
         controls = []
+        if parent_id is None and self._quote:   # 根界面顶部显示每日一句
+            qc = self._quote_card()
+            if qc is not None:
+                controls.append(qc)
         if not children:
             controls.append(self._empty_hint())
         for it in active:
@@ -212,11 +277,16 @@ class TaskApp:
 
         subs = []
         if it["deadline"]:
+            overdue = False
+            d = parse_deadline(it["deadline"])
+            if d is not None and d < dt.datetime.now():
+                overdue = True
             subs.append(
                 ft.Text(
                     fmt_deadline(it["deadline"]),
                     size=12,
                     color=self._deadline_color(it["deadline"]),
+                    weight=ft.FontWeight.BOLD if overdue else None,
                 )
             )
         if has_children:
@@ -271,7 +341,7 @@ class TaskApp:
 
     def _completed_header(self, count):
         return ft.ListTile(
-            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN),
+            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.TEAL),
             title=ft.Text(
                 f"已完成 ({count})", weight=ft.FontWeight.BOLD, color=ft.Colors.GREY
             ),
@@ -492,15 +562,153 @@ class TaskApp:
         self.page.pop_dialog()
         self._render()
 
+    # ================= 每日一句 =================
+    def _pick_quote(self):
+        """随机选一句每日一句；没有句子则为 None。"""
+        quotes = get_quotes()
+        self._quote = random.choice(quotes) if quotes else None
+
+    def _quote_card(self):
+        if not self._quote:
+            return None
+        return ft.Container(
+            on_click=lambda e: self._shuffle_quote(),
+            ink=True,
+            margin=ft.Margin(top=8, left=12, right=12, bottom=4),
+            padding=ft.Padding(left=16, right=16, top=12, bottom=12),
+            bgcolor=ft.Colors.with_opacity(0.55, ft.Colors.LIGHT_BLUE_50),
+            border_radius=10,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.LIGHT_BLUE_100)),
+            content=ft.Column(
+                [
+                    ft.Text("每日一句 · 点一下换一句", size=11,
+                            color=ft.Colors.BLUE_600, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"「{self._quote}」", size=14, italic=True,
+                            color=ft.Colors.BLUE_GREY_700),
+                ],
+                spacing=6,
+            ),
+        )
+
+    def _shuffle_quote(self):
+        self._pick_quote()
+        self._render()
+
+    def _edit_quotes(self, e):
+        self.page.pop_dialog()  # 先关掉设置对话框
+        field = ft.TextField(
+            label="每日一句（每行一句，空行忽略）",
+            value="\n".join(get_quotes()),
+            multiline=True,
+            min_lines=5,
+            max_lines=9,
+        )
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("编辑每日一句"),
+            content=field,
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(content="保存", on_click=lambda e: self._save_quotes(field)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _save_quotes(self, field):
+        save_quotes(field.value or "")
+        self.page.pop_dialog()
+        self._pick_quote()
+        self._render()
+
+    # ================= 自定义背景图 =================
+    def _apply_background(self):
+        """根据已保存的背景图刷新页面背景；无图则纯白。"""
+        path = self.db.get_bg_image()
+        if path:
+            src = _image_to_data_uri(path)
+            if src:
+                self._bg_root.image = ft.DecorationImage(src=src, fit=ft.BoxFit.COVER)
+                self._bg_overlay.bgcolor = ft.Colors.with_opacity(0.82, ft.Colors.WHITE)
+            else:
+                self._bg_root.image = None
+                self._bg_overlay.bgcolor = ft.Colors.WHITE
+        else:
+            self._bg_root.image = None
+            self._bg_overlay.bgcolor = ft.Colors.WHITE
+        self.page.update()
+
+    def _set_bg_image(self, e):
+        self.page.pop_dialog()
+        try:
+            files = self.file_picker.pick_files(
+                dialog_title="选择背景图片",
+                file_type=ft.FilePickerFileType.IMAGE,
+                with_data=True,
+            )
+        except Exception as ex:
+            self._toast(f"选择失败：{ex}")
+            return
+        if not files:
+            return
+        fp = files[0]
+        src_path = getattr(fp, "path", None)
+        try:
+            if src_path:
+                self.db.set_bg_image(src_path)
+            elif getattr(fp, "bytes", None):
+                tmp = os.path.join(DATA_DIR, "_bg_pick_tmp")
+                with open(tmp, "wb") as f:
+                    f.write(fp.bytes)
+                try:
+                    self.db.set_bg_image(tmp)
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            else:
+                self._toast("无法读取图片")
+                return
+        except (ValueError, OSError) as ex:
+            self._toast(f"设置背景失败：{ex}")
+            return
+        self._apply_background()
+        self._toast("背景图已设置")
+
+    def _clear_bg_image(self, e):
+        self.page.pop_dialog()
+        self.db.clear_bg_image()
+        self._apply_background()
+        self._toast("背景图已清除")
+
     # ================= 设置 / 备份 =================
     def _open_settings(self, e):
         dlg = ft.AlertDialog(
             modal=True,
+            scrollable=True,
             title=ft.Text("设置"),
             content=ft.Column(
                 [
                     ft.Text("数据目录", size=12, color=ft.Colors.GREY),
                     ft.Text(DATA_DIR, size=11, color=ft.Colors.GREY),
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.FORMAT_QUOTE),
+                        title=ft.Text("编辑每日一句"),
+                        subtitle=ft.Text("每行一句，打开 App 随机显示", size=11),
+                        on_click=self._edit_quotes,
+                    ),
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.IMAGE),
+                        title=ft.Text("设置背景图"),
+                        subtitle=ft.Text("从相册选一张作为背景", size=11),
+                        on_click=self._set_bg_image,
+                    ),
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.IMAGE_NOT_SUPPORTED),
+                        title=ft.Text("清除背景图"),
+                        on_click=self._clear_bg_image,
+                    ),
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.DOWNLOAD),
                         title=ft.Text("导出备份"),
@@ -596,15 +804,16 @@ class TaskApp:
         self.page.show_dialog(sb)
 
     def _deadline_color(self, s):
+        """冷静蓝梯度：浅蓝=常态，中蓝=24h 内，深蓝=已过期。"""
         d = parse_deadline(s)
         if d is None:
-            return ft.Colors.GREY
+            return ft.Colors.BLUE_GREY_400
         now = dt.datetime.now()
         if d < now:
-            return ft.Colors.RED_600        # 已过期
+            return ft.Colors.BLUE_900        # 已过期（深蓝，加粗提示）
         if d <= now + dt.timedelta(hours=24):
-            return ft.Colors.ORANGE_700     # 24 小时内
-        return ft.Colors.BLUE_GREY_600      # 常态
+            return ft.Colors.BLUE_600        # 24 小时内
+        return ft.Colors.LIGHT_BLUE_400      # 常态
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +875,24 @@ def run_selftest():
     db2.import_json(text)
     assert len(db2.roots()) == len(db.roots())
     assert db2.get(c1)["title"] == "子任务1" if db2.get(c1) else True  # 已删，忽略
+
+    # 每日一句
+    save_quotes("今天也要加油\n保持冷静")
+    assert get_quotes() == ["今天也要加油", "保持冷静"]
+    save_quotes("")
+
+    # 背景图模型往返
+    png_path = os.path.join(tmp, "b.png")
+    with open(png_path, "wb") as f:
+        f.write(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+            "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        ))
+    db.set_bg_image(png_path)
+    assert db.get_bg_image() is not None
+    assert _image_to_data_uri(db.get_bg_image()).startswith("data:image/png;base64,")
+    db.clear_bg_image()
+    assert db.get_bg_image() is None
 
     print("SELFTEST OK")
 

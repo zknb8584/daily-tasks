@@ -35,6 +35,25 @@ def _data_dir() -> str:
 
 DATA_DIR = _data_dir()
 DB_PATH = os.path.join(DATA_DIR, "tasks.db")
+QUOTES_PATH = os.path.join(DATA_DIR, "quotes.txt")
+
+
+# ---------------------------------------------------------------------------
+# 每日一句（每行一句）
+# ---------------------------------------------------------------------------
+def get_quotes() -> list:
+    """读取每日一句，按行切分、去空行。"""
+    try:
+        with open(QUOTES_PATH, encoding="utf-8") as f:
+            return [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def save_quotes(text: str):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(QUOTES_PATH, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +263,41 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    # ---------------- 自定义背景图 ----------------
+    def set_bg_image(self, src_path) -> str:
+        """把图片复制进数据目录，返回最终路径。"""
+        import shutil
+
+        ext = os.path.splitext(str(src_path))[1].lower() or ".png"
+        dest = os.path.join(DATA_DIR, "bg_image" + ext)
+        old = self.get_setting("bg_image", "")
+        if old and os.path.abspath(old) != os.path.abspath(dest):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        try:
+            shutil.copyfile(src_path, dest)
+        except OSError as e:
+            raise ValueError(f"无法保存背景图：{e}")
+        self.set_setting("bg_image", dest)
+        return dest
+
+    def get_bg_image(self) -> str | None:
+        p = self.get_setting("bg_image", "")
+        if p and os.path.exists(p):
+            return p
+        return None
+
+    def clear_bg_image(self):
+        p = self.get_setting("bg_image", "")
+        if p:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        self.set_setting("bg_image", "")
 
     # ---------------- 备份 ----------------
     def export(self) -> str:

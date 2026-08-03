@@ -6,6 +6,7 @@
 
 运行：python ui_test.py
 """
+import base64
 import datetime as dt
 import os
 import tempfile
@@ -98,8 +99,16 @@ def main():
     assert db.fully_done(b) is True
     assert db.fully_done(a) is False
 
+    # ---- 每日一句：先写入句子，App 启动时应随机显示一条 ----
+    appmod.save_quotes("第一句测试\n第二句测试")
+    assert appmod.get_quotes() == ["第一句测试", "第二句测试"]
+
     pg = FakePage()
     app = appmod.TaskApp(pg)
+
+    # ---- 冷静蓝配色 ----
+    assert pg.theme is not None and pg.theme.color_scheme_seed == ft.Colors.BLUE
+    assert pg.appbar.bgcolor == ft.Colors.BLUE_800
 
     # ---- 渲染：主列表应有 A、C；已完成区应有 B ----
     texts = rendered_texts(app)
@@ -107,6 +116,21 @@ def main():
     assert any("过期项目C" in t for t in texts), texts
     assert any("已完成 (1)" in t for t in texts), texts
     assert any("进度 1/2" in t for t in texts), texts
+
+    # ---- 每日一句：根界面顶部显示卡片，点一下换一句 ----
+    assert any("每日一句" in t for t in texts), texts
+    assert any("第一句测试" in t for t in texts) or any("第二句测试" in t for t in texts), texts
+    app._shuffle_quote()
+    texts = rendered_texts(app)
+    assert any("第一句测试" in t for t in texts) or any("第二句测试" in t for t in texts), texts
+
+    # ---- 进入子项目后不显示每日一句，返回根界面恢复 ----
+    app._enter_children(a)
+    texts = rendered_texts(app)
+    assert not any("每日一句" in t for t in texts), texts
+    app._back()
+    texts = rendered_texts(app)
+    assert any("每日一句" in t for t in texts), texts
 
     # ---- 勾选 c2：A 仍非整棵完工（A 自身未勾）→ 主列表进度变 2/2 ----
     cb = ft.Checkbox(value=False)
@@ -178,6 +202,35 @@ def main():
     # ---- 通知测试回调 ----
     app._test_notify(None)
     assert pg.pop_count > 0
+
+    # ---- 截止时间蓝色梯度 ----
+    now = dt.datetime.now()
+    assert app._deadline_color((now - dt.timedelta(hours=2)).strftime(appmod.DATETIME_FMT)) == ft.Colors.BLUE_900
+    assert app._deadline_color((now + dt.timedelta(hours=2)).strftime(appmod.DATETIME_FMT)) == ft.Colors.BLUE_600
+    assert app._deadline_color((now + dt.timedelta(days=2)).strftime(appmod.DATETIME_FMT)) == ft.Colors.LIGHT_BLUE_400
+
+    # ---- 背景图：模型往返 + 应用到页面 ----
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    img = os.path.join(tmp, "bg.png")
+    with open(img, "wb") as f:
+        f.write(png)
+    uri = appmod._image_to_data_uri(img)
+    assert uri and uri.startswith("data:image/png;base64,"), uri
+
+    db.set_bg_image(img)
+    assert db.get_bg_image() is not None
+    app._apply_background()
+    assert isinstance(app._bg_root.image, ft.DecorationImage)
+    db.clear_bg_image()
+    app._apply_background()
+    assert app._bg_root.image is None
+
+    # ---- 清理每日一句 ----
+    appmod.save_quotes("")
+    assert appmod.get_quotes() == []
 
     print("UI TEST OK")
 
