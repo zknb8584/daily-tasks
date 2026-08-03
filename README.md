@@ -87,8 +87,8 @@ flet doctor
 pip install flet
 
 flet build apk ^
-  --project "每日任务" ^
-  --product daily_tasks ^
+  --project daily_tasks ^
+  --product "每日任务" ^
   --org com.example ^
   --bundle-id com.example.daily_tasks ^
   --build-version 1.0.0 ^
