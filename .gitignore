@@ -1,0 +1,14 @@
+# 本地运行数据（SQLite / 桌面测试）
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# 构建产物（flet build 输出）
+build/
+dist/
+
+# 临时/开发
+.dev/
+.DS_Store
