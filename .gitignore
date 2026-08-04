@@ -12,3 +12,4 @@ dist/
 # 临时/开发
 .dev/
 .DS_Store
+_push.bat

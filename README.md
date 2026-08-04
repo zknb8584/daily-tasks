@@ -100,6 +100,8 @@ flet build apk ^
 
 > `^` 是 Windows cmd 续行符；Linux/macOS 用 `\`。去掉 `--arch arm64-v8a` 则打全 ABI（APK 更大但兼容所有机型）。
 
+> **签名说明**：仓库里已含 `android/daily_tasks.keystore`（CI 用它固定签名，密码 `DT-apk-2026-key`）。这样每次构建出的 APK 签名一致，手机**直接覆盖安装即可升级，无需卸载、不丢数据**。仓库是私有的，请勿公开。
+
 首次构建会联网拉取 Flet 的 Flutter 模板、Flutter/Gradle 依赖、并打包 Python 运行时，**需要 10~30 分钟**；成功后：
 
 - 输出目录：`task_app/build/apk/`

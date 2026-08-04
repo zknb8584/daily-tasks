@@ -37,6 +37,9 @@ DATA_DIR = _data_dir()
 DB_PATH = os.path.join(DATA_DIR, "tasks.db")
 QUOTES_PATH = os.path.join(DATA_DIR, "quotes.txt")
 
+# 标签调色板大小（颜色索引取 0..N-1，循环分配）
+TAG_PALETTE_SIZE = 12
+
 
 # ---------------------------------------------------------------------------
 # 每日一句（每行一句）
@@ -125,6 +128,17 @@ class Database:
             c.execute(
                 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)"
             )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS tags(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    color INTEGER DEFAULT 0
+                )"""
+            )
+            # 迁移：给 items 补 tag_id 列（老库升级用）
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(items)")]
+            if "tag_id" not in cols:
+                c.execute("ALTER TABLE items ADD COLUMN tag_id INTEGER")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -151,6 +165,66 @@ class Database:
     def set_done(self, item_id, done: bool):
         with self._conn() as c:
             c.execute("UPDATE items SET done=? WHERE id=?", (1 if done else 0, item_id))
+
+    def set_subtree_done(self, item_id, done: bool):
+        """整棵子树（含自身）统一标记完成/未完成。"""
+        ids = self._subtree_ids(item_id)
+        with self._conn() as c:
+            c.executemany(
+                "UPDATE items SET done=? WHERE id=?",
+                [(1 if done else 0, i) for i in ids],
+            )
+
+    def subtree_earliest_deadline(self, item_id):
+        """整组最早截止时间（自身+后代）；没有则 None。用于按 deadline 排序。"""
+        best = None
+        stack = [item_id]
+        with self._conn() as c:
+            while stack:
+                pid = stack.pop()
+                row = c.execute("SELECT deadline FROM items WHERE id=?", (pid,)).fetchone()
+                if row:
+                    d = parse_deadline(row["deadline"])
+                    if d is not None and (best is None or d < best):
+                        best = d
+                for r in c.execute("SELECT id FROM items WHERE parent_id=?", (pid,)):
+                    stack.append(r["id"])
+        return best
+
+    # ---------------- 标签 ----------------
+    def get_or_create_tag(self, name) -> int | None:
+        """按名取标签 id；不存在则创建并自动分配颜色（创建顺序取色）。"""
+        name = (name or "").strip()
+        if not name:
+            return None
+        with self._conn() as c:
+            row = c.execute("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
+            if row:
+                return row["id"]
+            n = c.execute("SELECT COUNT(*) AS n FROM tags").fetchone()["n"]
+            c.execute("INSERT INTO tags(name, color) VALUES(?,?)", (name, n % TAG_PALETTE_SIZE))
+            return c.execute(
+                "SELECT id FROM tags WHERE name=?", (name,)
+            ).fetchone()["id"]
+
+    def all_tags(self):
+        """返回 [(name, color_index), ...]"""
+        with self._conn() as c:
+            rows = c.execute("SELECT name, color FROM tags ORDER BY id").fetchall()
+        return [(r["name"], r["color"]) for r in rows]
+
+    def tag_by_id(self, tag_id):
+        if tag_id is None:
+            return None
+        with self._conn() as c:
+            row = c.execute("SELECT name, color FROM tags WHERE id=?", (tag_id,)).fetchone()
+        return (row["name"], row["color"]) if row else None
+
+    def set_item_tag(self, item_id, tag_name):
+        """给项目设置标签（空/None 清除）。"""
+        tid = self.get_or_create_tag(tag_name) if (tag_name or "").strip() else None
+        with self._conn() as c:
+            c.execute("UPDATE items SET tag_id=? WHERE id=?", (tid, item_id))
 
     def get(self, item_id):
         with self._conn() as c:
@@ -303,12 +377,14 @@ class Database:
     def export(self) -> str:
         with self._conn() as c:
             items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY id")]
+            tags = [dict(r) for r in c.execute("SELECT * FROM tags ORDER BY id")]
         return json.dumps(
             {
                 "app": "daily_tasks",
-                "version": 1,
+                "version": 2,
                 "exported_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "items": items,
+                "tags": tags,
             },
             ensure_ascii=False,
             indent=2,
@@ -321,10 +397,16 @@ class Database:
         items = data.get("items", [])
         with self._conn() as c:
             c.execute("DELETE FROM items")
+            c.execute("DELETE FROM tags")
+            for t in data.get("tags", []):
+                c.execute(
+                    "INSERT INTO tags(id,name,color) VALUES(?,?,?)",
+                    (t["id"], t.get("name", ""), t.get("color", 0)),
+                )
             for it in items:
                 c.execute(
-                    "INSERT INTO items(id,parent_id,title,deadline,done,created_at) "
-                    "VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO items(id,parent_id,title,deadline,done,created_at,tag_id) "
+                    "VALUES(?,?,?,?,?,?,?)",
                     (
                         it["id"],
                         it.get("parent_id"),
@@ -332,6 +414,7 @@ class Database:
                         it.get("deadline", ""),
                         1 if it.get("done") else 0,
                         it.get("created_at", ""),
+                        it.get("tag_id"),
                     ),
                 )
 
@@ -344,6 +427,12 @@ class Database:
         data = json.loads(text)
         if data.get("app") != "daily_tasks":
             raise ValueError("不是本应用的备份/计划文件")
+        # 先按名字重建标签（旧 tag_id → 新 tag_id）
+        tag_map = {}
+        for t in data.get("tags", []):
+            name = str(t.get("name", "")).strip()
+            if name:
+                tag_map[t["id"]] = self.get_or_create_tag(name)
         id_map = {}
         count = 0
         with self._conn() as c:
@@ -351,9 +440,10 @@ class Database:
                 title = str(it.get("title", "")).strip()
                 if not title:
                     continue
+                tag_id = tag_map.get(it.get("tag_id")) if it.get("tag_id") is not None else None
                 new_id = c.execute(
-                    "INSERT INTO items(parent_id,title,deadline,done,created_at) "
-                    "VALUES(?,?,?,?,?)",
+                    "INSERT INTO items(parent_id,title,deadline,done,created_at,tag_id) "
+                    "VALUES(?,?,?,?,?,?)",
                     (
                         id_map.get(it.get("parent_id")),
                         title,
@@ -361,6 +451,7 @@ class Database:
                         1 if it.get("done") else 0,
                         it.get("created_at")
                         or dt.datetime.now().isoformat(timespec="seconds"),
+                        tag_id,
                     ),
                 ).lastrowid
                 id_map[it["id"]] = new_id

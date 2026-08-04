@@ -105,6 +105,21 @@ def _image_to_data_uri(path) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# 标签调色板（索引与 models.TAG_PALETTE_SIZE 对齐）
+# ---------------------------------------------------------------------------
+TAG_COLORS = [
+    ft.Colors.BLUE_600, ft.Colors.TEAL_600, ft.Colors.PURPLE_600,
+    ft.Colors.GREEN_600, ft.Colors.BROWN_600, ft.Colors.PINK_600,
+    ft.Colors.CYAN_600, ft.Colors.ORANGE_800, ft.Colors.INDIGO_600,
+    ft.Colors.AMBER_700, ft.Colors.DEEP_PURPLE_600, ft.Colors.LIGHT_BLUE_600,
+]
+
+
+def _tag_color(color_idx):
+    return TAG_COLORS[color_idx % len(TAG_COLORS)]
+
+
+# ---------------------------------------------------------------------------
 # 主应用
 # ---------------------------------------------------------------------------
 class TaskApp:
@@ -114,8 +129,9 @@ class TaskApp:
         self.notifier = Notifier(self.db)
 
         self.stack = []                 # 导航栈：[(parent_id, title), ...]，空 = 顶层
-        self._completed_open = False    # 已完成折叠区是否展开
-        self._completed_ids = []        # 当前层级已完成项的 id
+        self._show_done = False         # 是否在全局「完成区」界面
+        self._tag_filter = None         # 首页标签筛选（None = 全部）
+        self._sort_by_deadline = False  # 是否按截止时间排序
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
         self._title_field = None
@@ -199,165 +215,237 @@ class TaskApp:
         return self.stack[-1]
 
     def _render(self):
-        parent_id, title = self._current()
-        self._update_appbar(parent_id, title)
-
-        children = self.db.roots() if parent_id is None else self.db.children(parent_id)
-        active, completed = [], []
-        for it in children:
-            if it["done"] and self.db.fully_done(it["id"]):
-                completed.append(it)
+        if self._show_done:
+            self._update_appbar(None, "完成区", done=True)
+            self.scroll.controls = self._render_done()
+        else:
+            parent_id, title = self._current()
+            self._update_appbar(parent_id, title)
+            if parent_id is None:
+                self.scroll.controls = self._render_home()
             else:
-                active.append(it)
-        active.sort(key=self._sort_key)
-        completed.sort(key=self._sort_key)
-        self._completed_ids = [it["id"] for it in completed]
+                self.scroll.controls = self._render_level(parent_id)
+        self._set_fab(not self._show_done)
+        self.page.update()
 
+    def _update_appbar(self, parent_id, title, done=False):
+        if done:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_done,
+            )
+            self.page.appbar.title = ft.Text("完成区")
+            self.page.appbar.actions = [self._settings_icon()]
+        else:
+            self.page.appbar.leading = (
+                ft.IconButton(
+                    icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                    icon_color=ft.Colors.ON_PRIMARY, on_click=self._back,
+                )
+                if self.stack
+                else None
+            )
+            self.page.appbar.title = ft.Text(title)
+            self.page.appbar.actions = [self._done_icon(), self._settings_icon()]
+
+    def _done_icon(self):
+        return ft.IconButton(
+            icon=ft.Icons.CHECK_CIRCLE, tooltip="完成区",
+            icon_color=ft.Colors.ON_PRIMARY, on_click=self._open_done,
+        )
+
+    def _settings_icon(self):
+        return ft.IconButton(
+            icon=ft.Icons.SETTINGS, tooltip="设置",
+            icon_color=ft.Colors.ON_PRIMARY, on_click=self._open_settings,
+        )
+
+    def _set_fab(self, visible):
+        fab = self.page.floating_action_button
+        if fab is not None:
+            fab.visible = visible
+
+    # ---------- 排序 / 截止时间辅助 ----------
+    def _own_deadline_ts(self, it):
+        d = parse_deadline(it["deadline"])
+        return d.timestamp() if d else float("inf")
+
+    def _group_deadline_ts(self, item_id):
+        d = self.db.subtree_earliest_deadline(item_id)
+        return d.timestamp() if d else float("inf")
+
+    def _sort_items(self, items, group=False):
+        if self._sort_by_deadline:
+            if group:
+                items.sort(key=lambda it: self._group_deadline_ts(it["id"]))
+            else:
+                items.sort(key=lambda it: self._own_deadline_ts(it))
+        else:
+            items.sort(key=lambda it: it["id"])
+
+    # ---------- 首页（两层分组） ----------
+    def _render_home(self):
         controls = []
-        if parent_id is None and self._quote:   # 根界面顶部显示每日一句
+        if self._quote:
             qc = self._quote_card()
             if qc is not None:
                 controls.append(qc)
-        if not children:
-            controls.append(self._empty_hint())
-        for it in active:
-            controls.append(self._item_row(it, in_completed=False))
-        if completed:
-            controls.append(self._completed_header(len(completed)))
-            if self._completed_open:
-                for it in completed:
-                    controls.append(self._item_row(it, in_completed=True))
+        controls.append(self._home_toolbar())
 
-        self.scroll.controls = controls
-        self.page.update()
+        roots = [r for r in self.db.roots() if not r["done"]]
+        if self._tag_filter:
+            roots = [r for r in roots if self._item_tag_name(r["id"]) == self._tag_filter]
+        self._sort_items(roots, group=True)
 
-    def _update_appbar(self, parent_id, title):
-        self.page.appbar.leading = (
-            ft.IconButton(
-                icon=ft.Icons.ARROW_BACK,
-                tooltip="返回",
-                icon_color=ft.Colors.ON_PRIMARY,
-                on_click=self._back,
+        if not roots:
+            controls.append(self._empty_hint("还没有项目，点右下角 + 新建"))
+        for r in roots:
+            kids = [k for k in self.db.children(r["id"]) if not k["done"]]
+            self._sort_items(kids)
+            controls.append(self._group_frame(r, kids))
+        return controls
+
+    def _home_toolbar(self):
+        chips = [
+            ft.Chip(
+                label=ft.Text("全部"), selected=(self._tag_filter is None),
+                selected_color=ft.Colors.BLUE_600,
+                on_select=lambda e: self._set_tag_filter(None),
             )
-            if self.stack
-            else None
+        ]
+        for name, color_idx in self.db.all_tags():
+            col = _tag_color(color_idx)
+            chips.append(ft.Chip(
+                label=ft.Text(name), selected=(self._tag_filter == name),
+                selected_color=col,
+                on_select=lambda e, n=name: self._set_tag_filter(n),
+            ))
+        seg = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="default", label=ft.Text("默认")),
+                ft.Segment(value="deadline", label=ft.Text("截止时间")),
+            ],
+            selected=["deadline" if self._sort_by_deadline else "default"],
+            allow_empty_selection=False,
+            on_change=self._on_sort_change,
         )
-        self.page.appbar.title = ft.Text(title)
-
-    def _sort_key(self, it):
-        d = parse_deadline(it["deadline"])
-        ts = d.timestamp() if d else float("inf")
-        return (1 if it["done"] else 0, ts, it["id"])
-
-    def _empty_hint(self):
         return ft.Container(
-            padding=ft.Padding(top=100, left=24, right=24),
+            padding=ft.Padding(left=12, right=12, top=4, bottom=2),
+            content=ft.Column([
+                ft.Row(chips, scroll=ft.ScrollMode.AUTO, spacing=6),
+                ft.Row([
+                    ft.Text("排序：", size=12, color=ft.Colors.BLUE_GREY_600),
+                    seg,
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], spacing=8),
+        )
+
+    def _set_tag_filter(self, name):
+        self._tag_filter = name
+        self._render()
+
+    def _on_sort_change(self, e):
+        self._sort_by_deadline = "deadline" in (e.control.selected or set())
+        self._render()
+
+    def _item_tag_name(self, item_id):
+        tag = self.db.tag_by_id(self.db.get(item_id).get("tag_id"))
+        return tag[0] if tag else None
+
+    # ---------- 子视图（单层卡片列表） ----------
+    def _render_level(self, parent_id):
+        children = [c for c in self.db.children(parent_id) if not c["done"]]
+        self._sort_items(children)
+        if not children:
+            return [self._empty_hint("这个项目下还没有子任务")]
+        return [self._item_row(c) for c in children]
+
+    # ---------- 全局完成区 ----------
+    def _render_done(self):
+        controls = []
+        done_roots = [r for r in self.db.roots() if r["done"]]
+        controls.append(self._section_title(f"已完成的大项目 ({len(done_roots)})"))
+        if done_roots:
+            self._sort_items(done_roots, group=True)
+            for r in done_roots:
+                controls.append(self._done_group(r))
+        else:
+            controls.append(self._hint_text("暂无已完成的大项目"))
+
+        standalone = []
+        for r in self.db.roots():
+            if r["done"]:
+                continue
+            for c in self.db.children(r["id"]):
+                if c["done"]:
+                    standalone.append((r, c))
+        controls.append(self._section_title(f"进行中项目下的已完成子任务 ({len(standalone)})"))
+        if standalone:
+            for parent, c in standalone:
+                controls.append(self._done_row(c, parent_title=parent["title"]))
+        else:
+            controls.append(self._hint_text("暂无"))
+
+        controls.append(ft.Container(
+            padding=ft.Padding(top=12, bottom=20),
+            alignment=ft.Alignment(0, 0),
+            content=ft.TextButton("清除全部已完成", on_click=self._confirm_clear_all),
+        ))
+        return controls
+
+    def _section_title(self, text):
+        return ft.Container(
+            margin=ft.Margin(left=16, right=12, top=12, bottom=2),
+            content=ft.Text(text, size=13, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_GREY_600),
+        )
+
+    def _hint_text(self, text):
+        return ft.Container(
+            padding=ft.Padding(left=16, right=12, top=6, bottom=6),
+            content=ft.Text(text, size=12, color=ft.Colors.GREY),
+        )
+
+    def _empty_hint(self, text="还没有项目"):
+        return ft.Container(
+            padding=ft.Padding(top=90, left=24, right=24),
             alignment=ft.Alignment(0, 0),
             content=ft.Column(
                 [
                     ft.Icon(ft.Icons.CHECKLIST, size=64, color=ft.Colors.GREY),
-                    ft.Text("还没有项目", size=17, color=ft.Colors.GREY),
-                    ft.Text("点右下角 + 新建一个吧", size=13, color=ft.Colors.GREY),
+                    ft.Text(text, size=15, color=ft.Colors.GREY),
+                    ft.Text("点右下角 + 新建", size=12, color=ft.Colors.GREY),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
             ),
         )
 
-    # ================= 列表行（卡片式） =================
-    def _item_row(self, it, in_completed=False):
+    # ================= 列表行（卡片式，用于子视图） =================
+    def _item_row(self, it):
         item_id = it["id"]
         done = bool(it["done"])
         has_children = self.db.has_children(item_id)
 
-        # 标题
         title_style = None
         if done:
             title_style = ft.TextStyle(
                 decoration=ft.TextDecoration.LINE_THROUGH, color=ft.Colors.GREY
             )
         title = ft.Text(
-            it["title"], size=16, weight=ft.FontWeight.W_500, style=title_style,
+            it["title"], size=15, weight=ft.FontWeight.W_500, style=title_style,
             max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
         )
-
-        # 元信息行：截止时间胶囊 + 进度
         meta = []
         if it["deadline"]:
-            overdue = False
-            d = parse_deadline(it["deadline"])
-            if d is not None and d < dt.datetime.now():
-                overdue = True
-            dl_color = self._deadline_color(it["deadline"])
-            meta.append(
-                ft.Container(
-                    padding=ft.Padding(left=8, right=8, top=2, bottom=2),
-                    border_radius=8,
-                    bgcolor=ft.Colors.with_opacity(0.14, dl_color),
-                    content=ft.Text(
-                        fmt_deadline(it["deadline"]),
-                        size=11, color=dl_color,
-                        weight=ft.FontWeight.BOLD if overdue else None,
-                    ),
-                )
-            )
+            meta.append(self._deadline_pill(it["deadline"]))
         if has_children:
             dd, tt = self.db.subtree_stats(item_id)
             meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
         meta_row = ft.Row(meta, spacing=8) if meta else None
 
-        # ⋯ 菜单：添加子项目 / 进入子项目 / 编辑 / 删除
-        menu_items = [
-            ft.PopupMenuItem(
-                content=ft.Text("添加子项目"),
-                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-                on_click=lambda e, i=item_id: self._open_edit(parent_id=i),
-            )
-        ]
-        if has_children:
-            menu_items.append(
-                ft.PopupMenuItem(
-                    content=ft.Text("进入子项目"),
-                    icon=ft.Icons.CHEVRON_RIGHT,
-                    on_click=lambda e, i=item_id: self._enter_children(i),
-                )
-            )
-        if in_completed:
-            menu_items.append(
-                ft.PopupMenuItem(
-                    content=ft.Text("恢复"),
-                    icon=ft.Icons.UNDO,
-                    on_click=lambda e, i=item_id: self._restore(i),
-                )
-            )
-        else:
-            menu_items.append(
-                ft.PopupMenuItem(
-                    content=ft.Text("编辑"),
-                    icon=ft.Icons.EDIT,
-                    on_click=lambda e, i=item_id: self._open_edit(i),
-                )
-            )
-        menu_items.append(
-            ft.PopupMenuItem(
-                content=ft.Text("删除"),
-                icon=ft.Icons.DELETE,
-                on_click=lambda e, i=item_id: self._confirm_delete(i),
-            )
-        )
-
-        # 卡片
-        return ft.Container(
+        return self._card(
             margin=ft.Margin(left=12, right=12, top=5, bottom=5),
-            padding=ft.Padding(left=6, right=4, top=6, bottom=6),
-            border_radius=12,
-            bgcolor=ft.Colors.WHITE,
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.LIGHT_BLUE_100)),
-            shadow=ft.BoxShadow(
-                blur_radius=4,
-                color=ft.Colors.with_opacity(0.06, ft.Colors.BLUE_GREY_700),
-                offset=ft.Offset(0, 1),
-            ),
             opacity=0.6 if done else 1.0,
             content=ft.Row(
                 [
@@ -375,38 +463,267 @@ class TaskApp:
                             spacing=4,
                         ),
                     ),
-                    ft.PopupMenuButton(
-                        icon=ft.Icons.MORE_VERT,
-                        icon_color=ft.Colors.BLUE_GREY_600,
-                        tooltip="更多操作",
-                        items=menu_items,
-                    ),
+                    self._item_menu(item_id, has_children),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
-    def _completed_header(self, count):
+    def _card(self, margin, opacity=1.0, content=None):
         return ft.Container(
-            margin=ft.Margin(left=16, right=12, top=10, bottom=2),
+            margin=margin,
+            padding=ft.Padding(left=6, right=4, top=6, bottom=6),
+            border_radius=12,
+            bgcolor=ft.Colors.WHITE,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, ft.Colors.LIGHT_BLUE_100)),
+            shadow=ft.BoxShadow(
+                blur_radius=4,
+                color=ft.Colors.with_opacity(0.06, ft.Colors.BLUE_GREY_700),
+                offset=ft.Offset(0, 1),
+            ),
+            opacity=opacity,
+            content=content,
+        )
+
+    def _deadline_pill(self, deadline):
+        overdue = False
+        d = parse_deadline(deadline)
+        if d is not None and d < dt.datetime.now():
+            overdue = True
+        dl_color = self._deadline_color(deadline)
+        return ft.Container(
+            padding=ft.Padding(left=8, right=8, top=2, bottom=2),
+            border_radius=8,
+            bgcolor=ft.Colors.with_opacity(0.14, dl_color),
+            content=ft.Text(
+                fmt_deadline(deadline),
+                size=11, color=dl_color,
+                weight=ft.FontWeight.BOLD if overdue else None,
+            ),
+        )
+
+    def _tag_pill(self, tag):
+        name, color_idx = tag
+        col = _tag_color(color_idx)
+        return ft.Container(
+            padding=ft.Padding(left=8, right=8, top=2, bottom=2),
+            border_radius=8,
+            bgcolor=ft.Colors.with_opacity(0.16, col),
+            content=ft.Text(name, size=11, color=col, weight=ft.FontWeight.BOLD),
+        )
+
+    def _item_menu(self, item_id, has_children, done_ctx=False):
+        menu = [
+            ft.PopupMenuItem(
+                content=ft.Text("添加子项目"),
+                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
+                on_click=lambda e, i=item_id: self._open_edit(parent_id=i),
+            )
+        ]
+        if has_children:
+            menu.append(ft.PopupMenuItem(
+                content=ft.Text("进入子项目"),
+                icon=ft.Icons.CHEVRON_RIGHT,
+                on_click=lambda e, i=item_id: self._enter_children(i),
+            ))
+        if done_ctx:
+            menu.append(ft.PopupMenuItem(
+                content=ft.Text("撤销完成"),
+                icon=ft.Icons.UNDO,
+                on_click=lambda e, i=item_id: self._undo_completed(i),
+            ))
+        else:
+            menu.append(ft.PopupMenuItem(
+                content=ft.Text("编辑"),
+                icon=ft.Icons.EDIT,
+                on_click=lambda e, i=item_id: self._open_edit(i),
+            ))
+        menu.append(ft.PopupMenuItem(
+            content=ft.Text("删除"),
+            icon=ft.Icons.DELETE,
+            on_click=lambda e, i=item_id: self._confirm_delete(i),
+        ))
+        return ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            icon_color=ft.Colors.BLUE_GREY_600,
+            tooltip="更多操作",
+            items=menu,
+        )
+
+    # ================= 首页两层分组 =================
+    def _group_frame(self, root, kids):
+        item_id = root["id"]
+        header_meta = []
+        if root["deadline"]:
+            header_meta.append(self._deadline_pill(root["deadline"]))
+        dd, tt = self.db.subtree_stats(item_id)
+        header_meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
+        tag = self.db.tag_by_id(root.get("tag_id"))
+        if tag:
+            header_meta.append(self._tag_pill(tag))
+
+        header = ft.Row(
+            [
+                ft.Checkbox(
+                    value=False,
+                    active_color=ft.Colors.PRIMARY,
+                    on_change=lambda e, i=item_id: self._on_toggle(e, i),
+                ),
+                ft.Container(
+                    expand=True,
+                    on_click=lambda e, i=item_id: self._enter_children(i),
+                    on_long_press=lambda e, i=item_id: self._open_edit(i),
+                    content=ft.Column(
+                        [
+                            ft.Text(root["title"], size=18, weight=ft.FontWeight.BOLD,
+                                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Row(header_meta, spacing=8),
+                        ],
+                        spacing=4,
+                    ),
+                ),
+                self._item_menu(item_id, bool(kids)),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        inner = [header]
+        if kids:
+            inner.append(ft.Divider(height=1, color=ft.Colors.with_opacity(0.2, ft.Colors.BLUE_GREY_300)))
+            for k in kids:
+                inner.append(self._child_row(k))
+        return self._card(
+            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+            content=ft.Column(inner, spacing=0, tight=True),
+        )
+
+    def _child_row(self, it):
+        item_id = it["id"]
+        has_children = self.db.has_children(item_id)
+        meta = []
+        if it["deadline"]:
+            meta.append(self._deadline_pill(it["deadline"]))
+        return ft.Container(
+            padding=ft.Padding(left=8, right=4, top=3, bottom=3),
+            content=ft.Row(
+                [
+                    ft.Checkbox(
+                        value=False,
+                        active_color=ft.Colors.PRIMARY,
+                        on_change=lambda e, i=item_id: self._on_toggle(e, i),
+                    ),
+                    ft.Container(
+                        expand=True,
+                        on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
+                        on_long_press=lambda e, i=item_id: self._open_edit(i),
+                        content=ft.Column(
+                            [
+                                ft.Text(it["title"], size=13, max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Row(meta, spacing=8) if meta else None,
+                            ],
+                            spacing=2,
+                        ),
+                    ),
+                    self._item_menu(item_id, has_children),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    # ================= 完成区 =================
+    def _done_group(self, root):
+        item_id = root["id"]
+        kids = self.db.children(item_id)
+        self._sort_items(kids)
+        header = ft.Row(
+            [
+                ft.Checkbox(
+                    value=True,
+                    active_color=ft.Colors.PRIMARY,
+                    on_change=lambda e, i=item_id: self._undo_completed(i),
+                ),
+                ft.Container(
+                    expand=True,
+                    content=ft.Text(
+                        root["title"], size=18, weight=ft.FontWeight.BOLD,
+                        style=ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH,
+                                            color=ft.Colors.GREY),
+                        max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ),
+                self._item_menu(item_id, bool(kids), done_ctx=True),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        inner = [header]
+        if kids:
+            inner.append(ft.Divider(height=1, color=ft.Colors.with_opacity(0.2, ft.Colors.BLUE_GREY_300)))
+            for k in kids:
+                inner.append(self._done_child_row(k))
+        return self._card(
+            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+            opacity=0.75,
+            content=ft.Column(inner, spacing=0, tight=True),
+        )
+
+    def _done_child_row(self, it):
+        item_id = it["id"]
+        meta = []
+        if it["deadline"]:
+            meta.append(self._deadline_pill(it["deadline"]))
+        return ft.Container(
+            padding=ft.Padding(left=8, right=4, top=3, bottom=3),
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
-                    ft.Text(
-                        f"已完成 ({count})",
-                        size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_GREY_600,
+                    ft.Container(
+                        expand=True,
+                        content=ft.Column(
+                            [
+                                ft.Text(it["title"], size=13,
+                                        style=ft.TextStyle(
+                                            decoration=ft.TextDecoration.LINE_THROUGH,
+                                            color=ft.Colors.GREY),
+                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Row(meta, spacing=8) if meta else None,
+                            ],
+                            spacing=2,
+                        ),
                     ),
-                    ft.Container(expand=True),
-                    ft.TextButton("清除全部", on_click=self._clear_completed),
-                    ft.Icon(
-                        ft.Icons.EXPAND_LESS if self._completed_open else ft.Icons.EXPAND_MORE,
-                        size=18, color=ft.Colors.BLUE_GREY_600,
-                    ),
+                    self._item_menu(item_id, False, done_ctx=True),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=6,
             ),
-            on_click=lambda e: self._toggle_completed(),
+        )
+
+    def _done_row(self, it, parent_title):
+        item_id = it["id"]
+        return self._card(
+            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+            opacity=0.75,
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
+                    ft.Container(
+                        expand=True,
+                        content=ft.Column(
+                            [
+                                ft.Text(it["title"], size=14,
+                                        style=ft.TextStyle(
+                                            decoration=ft.TextDecoration.LINE_THROUGH,
+                                            color=ft.Colors.GREY),
+                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(f"属于：{parent_title}", size=11,
+                                        color=ft.Colors.BLUE_GREY_400),
+                            ],
+                            spacing=2,
+                        ),
+                    ),
+                    self._item_menu(item_id, False, done_ctx=True),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
 
     # ================= 交互 =================
@@ -421,13 +738,13 @@ class TaskApp:
         if not it:
             return
         self.stack.append((item_id, it["title"]))
-        self._completed_open = False
         self._render()
 
     def _back(self, e=None):
-        if self.stack:
+        if self._show_done:
+            self._close_done()
+        elif self.stack:
             self.stack.pop()
-            self._completed_open = False
             self._render()
 
     def _on_key(self, e):
@@ -438,50 +755,90 @@ class TaskApp:
         parent_id = self.stack[-1][0] if self.stack else None
         self._open_edit(parent_id=parent_id)
 
+    # ---- 勾选完成：有子项需确认（防误触）；叶子直接完成 ----
     def _on_toggle(self, e, item_id):
         new_val = bool(e.control.value)
+        if new_val and self.db.has_children(item_id):
+            e.control.value = False          # 先回退勾选，等确认
+            self.page.update()
+            self._confirm_complete_group(item_id)
+            return
         self.db.set_done(item_id, new_val)
-        if new_val:
-            if self.db.fully_done(item_id):
-                self._toast("已移至「已完成」", action_label="撤销",
-                            on_undo=lambda: self._undo_done(item_id))
-            else:
-                self._toast("已标记完成", action_label="撤销",
-                            on_undo=lambda: self._undo_done(item_id))
         self._render()
 
-    def _undo_done(self, item_id):
-        self.db.set_done(item_id, False)
-        self._render()
-
-    def _restore(self, item_id):
-        self.db.set_done(item_id, False)
-        self._render()
-
-    def _toggle_completed(self):
-        self._completed_open = not self._completed_open
-        self._render()
-
-    def _clear_completed(self, e):
-        n = len(self._completed_ids)
-        if not n:
+    def _confirm_complete_group(self, item_id):
+        it = self.db.get(item_id)
+        if not it:
             return
         dlg = ft.AlertDialog(
             modal=True,
-            title=ft.Text("清除已完成"),
-            content=ft.Text(f"将删除当前层级的 {n} 个已完成项目（含其子项目），确定？"),
+            title=ft.Text("整个项目都完成了吗？"),
+            content=ft.Text(f"「{it['title']}」\n确认后将连同所有子任务一起移入完成区。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
-                ft.FilledButton(content="删除", on_click=lambda e: self._do_clear_completed()),
+                ft.FilledButton(content="确认完成", on_click=lambda e: self._do_complete_group(item_id)),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(dlg)
 
-    def _do_clear_completed(self):
+    def _do_complete_group(self, item_id):
         self.page.pop_dialog()
-        self.db.delete_many(self._completed_ids)
-        self._completed_ids = []
+        self.db.set_subtree_done(item_id, True)
+        self._render()
+
+    # ---- 完成区 ----
+    def _open_done(self, e=None):
+        self._show_done = True
+        self._render()
+
+    def _close_done(self, e=None):
+        self._show_done = False
+        self._render()
+
+    def _undo_completed(self, item_id):
+        """撤销完成：整组（含后代）恢复未完成，放回首页。"""
+        self.db.set_subtree_done(item_id, False)
+        self._render()
+
+    def _all_done_items(self):
+        """返回所有应处于完成区的条目 id（完成的大项目整组 + 进行中项目下完成的子任务）。"""
+        ids = []
+        for r in self.db.roots():
+            if r["done"]:
+                ids.extend(self.db._subtree_ids(r["id"]))
+            else:
+                for c in self.db.children(r["id"]):
+                    if c["done"]:
+                        ids.append(c["id"])
+        return ids
+
+    def _confirm_clear_all(self, e):
+        ids = self._all_done_items()
+        if not ids:
+            self._toast("完成区是空的")
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("清除全部已完成"),
+            content=ft.Text(f"将删除完成区里的 {len(ids)} 个项目（含其子项目），确定？"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(content="删除", on_click=lambda e: self._do_clear_all()),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _do_clear_all(self):
+        self.page.pop_dialog()
+        for r in self.db.roots():
+            if r["done"]:
+                self.db.delete(r["id"])            # 整组级联删除
+            else:
+                for c in self.db.children(r["id"]):
+                    if c["done"]:
+                        self.db.delete(c["id"])
         self._render()
 
     def _confirm_delete(self, item_id):
@@ -522,25 +879,48 @@ class TaskApp:
             autofocus=True,
             on_submit=self._save_edit,
         )
+        body = [
+            self._title_field,
+            self._dl_label,
+            ft.Row(
+                [
+                    ft.OutlinedButton(content="设置日期", on_click=self._pick_date),
+                    ft.OutlinedButton(content="设置时间", on_click=self._pick_time),
+                    ft.TextButton(content="清除", on_click=self._clear_deadline),
+                ],
+                spacing=6,
+            ),
+        ]
+
+        # 标签选择器（仅第一层大项目可分配标签）
+        self._tag_field = None
+        is_root = (item_id is None and parent_id is None) or (
+            item_id is not None and it is not None and it["parent_id"] is None
+        )
+        if is_root:
+            current_tag = ""
+            if it and it.get("tag_id"):
+                t = self.db.tag_by_id(it["tag_id"])
+                current_tag = t[0] if t else ""
+            self._tag_field = ft.TextField(
+                label="标签（可选）", value=current_tag,
+                hint_text="输入标签名，或点下方已有标签",
+            )
+            quick = []
+            for name, color_idx in self.db.all_tags():
+                col = _tag_color(color_idx)
+                quick.append(ft.OutlinedButton(
+                    content=ft.Text(name, color=col),
+                    on_click=lambda e, n=name: self._set_tag_field(n),
+                ))
+            body.append(self._tag_field)
+            if quick:
+                body.append(ft.Row(quick, scroll=ft.ScrollMode.AUTO, spacing=6))
+
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("编辑项目" if item_id else "新建项目"),
-            content=ft.Column(
-                [
-                    self._title_field,
-                    self._dl_label,
-                    ft.Row(
-                        [
-                            ft.OutlinedButton(content="设置日期", on_click=self._pick_date),
-                            ft.OutlinedButton(content="设置时间", on_click=self._pick_time),
-                            ft.TextButton(content="清除", on_click=self._clear_deadline),
-                        ],
-                        spacing=6,
-                    ),
-                ],
-                tight=True,
-                spacing=12,
-            ),
+            content=ft.Column(body, tight=True, spacing=12),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton(content="保存", on_click=self._save_edit),
@@ -548,6 +928,11 @@ class TaskApp:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(dlg)
+
+    def _set_tag_field(self, name):
+        if self._tag_field is not None:
+            self._tag_field.value = name
+            self._tag_field.update()
 
     def _update_dl_label(self):
         s = self._dl_state.display()
@@ -607,8 +992,12 @@ class TaskApp:
             return
         if self._editing_id:
             self.db.update(self._editing_id, title=title, deadline=self._dl_state.to_str())
+            item_id = self._editing_id
         else:
-            self.db.add(self._target_parent, title, self._dl_state.to_str())
+            item_id = self.db.add(self._target_parent, title, self._dl_state.to_str())
+        if self._tag_field is not None:   # 仅第一层大项目有标签字段
+            tag = (self._tag_field.value or "").strip()
+            self.db.set_item_tag(item_id, tag or None)
         self.page.pop_dialog()
         self._render()
 

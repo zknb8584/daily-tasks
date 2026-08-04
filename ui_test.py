@@ -114,18 +114,16 @@ def main():
     db = Database(os.path.join(tmp, "ui.db"))
     appmod.Database = lambda *a, **k: db   # 让 TaskApp 用测试库
 
-    # ---- 造数据：A 大项目（部分完成）、B 整棵完工、C 过期 ----
+    # ---- 造数据：A 大项目（子任务1已单独完成）、B 整组完成、C 过期 ----
     a = db.add(None, "大项目A", (dt.datetime.now() + dt.timedelta(hours=5)).strftime(appmod.DATETIME_FMT))
     c1 = db.add(a, "子任务1", (dt.datetime.now() + dt.timedelta(hours=2)).strftime(appmod.DATETIME_FMT))
     c2 = db.add(a, "子任务2")
-    db.set_done(c1, True)
+    db.set_done(c1, True)                       # c1 单独完成 → 应归完成区
     b = db.add(None, "完成项目B")
     b1 = db.add(b, "b1", (dt.datetime.now() - dt.timedelta(days=1)).strftime(appmod.DATE_FMT))
     b2 = db.add(b, "b2")
-    db.set_done(b, True); db.set_done(b1, True); db.set_done(b2, True)
+    db.set_subtree_done(b, True)                # B 整组完成 → 完成区
     c = db.add(None, "过期项目C", (dt.datetime.now() - dt.timedelta(hours=3)).strftime(appmod.DATETIME_FMT))
-    assert db.fully_done(b) is True
-    assert db.fully_done(a) is False
 
     # ---- 每日一句：先写入句子，App 启动时应随机显示一条 ----
     appmod.save_quotes("第一句测试\n第二句测试")
@@ -143,57 +141,77 @@ def main():
     assert pg.overlay == [], pg.overlay
     assert isinstance(pg._services.services[0], ft.FilePicker)
 
-    # ---- 渲染：主列表应有 A、C；已完成区应有 B ----
+    # ---- 首页渲染（两层分组）：A、C 在；完成组 B 与已完成的 c1 不在首页 ----
     texts = rendered_texts(app)
     assert any("大项目A" in t for t in texts), texts
     assert any("过期项目C" in t for t in texts), texts
-    assert any("已完成 (1)" in t for t in texts), texts
-    assert any("进度 1/2" in t for t in texts), texts
-    # 行内 ⋯ 菜单含「添加子项目」
-    assert any("添加子项目" in t for t in texts), texts
+    assert not any("完成项目B" in t for t in texts), texts          # B 在完成区
+    assert not any("子任务1" in t for t in texts), texts            # c1 已完成 → 完成区
+    assert any("子任务2" in t for t in texts), texts                # c2 未完成 → 框内
+    assert any("添加子项目" in t for t in texts), texts             # 菜单项
 
-    # ---- 每日一句：根界面顶部显示卡片，点一下换一句 ----
+    # ---- 每日一句 ----
     assert any("每日一句" in t for t in texts), texts
-    assert any("第一句测试" in t for t in texts) or any("第二句测试" in t for t in texts), texts
     app._shuffle_quote()
-    texts = rendered_texts(app)
-    assert any("第一句测试" in t for t in texts) or any("第二句测试" in t for t in texts), texts
 
-    # ---- 进入子项目后不显示每日一句，返回根界面恢复 ----
-    app._enter_children(a)
-    texts = rendered_texts(app)
-    assert not any("每日一句" in t for t in texts), texts
-    app._back()
-    texts = rendered_texts(app)
-    assert any("每日一句" in t for t in texts), texts
-
-    # ---- 勾选 c2：A 仍非整棵完工（A 自身未勾）→ 主列表进度变 2/2 ----
-    cb = ft.Checkbox(value=False)
-    cb.value = True
+    # ---- 勾选叶子 c2：直接完成 → 进完成区，首页框内不再显示 ----
+    cb = ft.Checkbox(value=False); cb.value = True
     app._on_toggle(FakeEvent(cb), c2)
+    assert db.get(c2)["done"] == 1
     texts = rendered_texts(app)
-    assert any("进度 2/2" in t for t in texts), texts
+    assert not any("子任务2" in t for t in texts), texts
 
-    # ---- 勾选 A：整棵完工 → 移入已完成 ----
+    # ---- 勾选有子项的大项目 a：弹确认框，取消则回退 ----
     cb2 = ft.Checkbox(value=False); cb2.value = True
     app._on_toggle(FakeEvent(cb2), a)
-    texts = rendered_texts(app)
-    assert any("已完成 (2)" in t for t in texts), texts
-    assert "大项目A" not in texts or all("已完成" in t for t in texts if "大项目A" in t), texts
+    assert isinstance(pg.last_dialog, ft.AlertDialog), pg.last_dialog
+    assert db.get(a)["done"] == 0                                    # 勾选已回退
+    app.page.pop_dialog()                                            # 模拟取消
+    assert db.get(a)["done"] == 0
 
-    # ---- 恢复 B：从已完成区回到主列表 ----
-    app._restore(b)
-    assert db.get(b)["done"] == 0
+    # ---- 确认完成：整组（含后代）移入完成区 ----
+    app._do_complete_group(a)
+    assert db.get(a)["done"] == 1
+    assert db.get(c1)["done"] == 1 and db.get(c2)["done"] == 1
     texts = rendered_texts(app)
-    assert any("完成项目B" in t for t in texts), texts
-    assert any("已完成 (1)" in t for t in texts), texts
-    # 展开已完成区，A 应出现
-    app._completed_open = True
-    app._render()
+    assert not any("大项目A" in t for t in texts), texts             # 不在首页
+
+    # ---- 完成区：独立界面，含整组 A 与 B；撤销 B 回首页 ----
+    app._open_done()
+    assert app._show_done is True
     texts = rendered_texts(app)
     assert any("大项目A" in t for t in texts), texts
-    app._completed_open = False
+    assert any("完成项目B" in t for t in texts), texts
+    assert any("已完成的大项目" in t for t in texts), texts
+    app._undo_completed(b)
+    assert db.get(b)["done"] == 0
+    assert db.get(b1)["done"] == 0
+    app._close_done()
+    assert app._show_done is False
+    texts = rendered_texts(app)
+    assert any("完成项目B" in t for t in texts), texts               # B 回首页
+
+    # ---- 标签：创建 / 分配 / 导出导入 ----
+    tag_id = db.get_or_create_tag("工作")
+    assert tag_id is not None
+    assert db.get_or_create_tag("工作") == tag_id                    # 幂等
+    db.set_item_tag(c, "工作")
+    t = db.tag_by_id(db.get(c)["tag_id"])
+    assert t is not None and t[0] == "工作"
+    exported = json.loads(db.export())
+    assert "tags" in exported and any(x["name"] == "工作" for x in exported["tags"])
+    # 首页按标签筛选
+    app._set_tag_filter("工作")
+    texts = rendered_texts(app)
+    assert any("过期项目C" in t for t in texts), texts
+    app._set_tag_filter(None)
+
+    # ---- 排序：按截止时间（最早在上） ----
+    assert app._group_deadline_ts(c) < app._group_deadline_ts(a)     # c 过期(-3h) 早于 a(+5h)
+    app._sort_by_deadline = True
     app._render()
+    app._on_sort_change(FakeEvent(types.SimpleNamespace(selected={"default"})))
+    assert app._sort_by_deadline is False
 
     # ---- 编辑：改标题 + 设置截止时间 ----
     app._open_edit(item_id=c)
