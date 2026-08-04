@@ -446,10 +446,14 @@ class TaskApp:
 
         if not roots:
             controls.append(self._empty_hint("还没有项目，点右下角 + 新建"))
-        for r in roots:
+        for i, r in enumerate(roots):
             kids = [k for k in self.db.children(r["id"]) if not k["done"]]
             self._sort_items(kids)
-            controls.append(self._group_frame(r, kids))
+            controls.append(self._level1_row(r, kids))
+            if i < len(roots) - 1:
+                controls.append(ft.Divider(
+                    height=1, color=ft.Colors.with_opacity(0.25, ft.Colors.BLUE_GREY_200),
+                ))
         return controls
 
     def _home_toolbar(self):
@@ -726,59 +730,60 @@ class TaskApp:
         )
 
     # ================= 首页两层分组 =================
-    def _group_frame(self, root, kids):
+    def _level1_row(self, root, kids):
+        """第一层项目行：大字号，无框。"""
         item_id = root["id"]
-        header_meta = []
+        meta = []
         if root["deadline"]:
-            header_meta.append(self._deadline_pill(root["deadline"]))
+            meta.append(self._deadline_pill(root["deadline"]))
         ni = self._note_icon(root)
         if ni:
-            header_meta.append(ni)
+            meta.append(ni)
         rp = self._repeat_pill(root)
         if rp:
-            header_meta.append(rp)
+            meta.append(rp)
         dd, tt = self.db.subtree_stats(item_id)
-        header_meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
+        meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
         tag = self.db.tag_by_id(root.get("tag_id"))
         if tag:
-            header_meta.append(self._tag_pill(tag))
+            meta.append(self._tag_pill(tag))
 
-        header = ft.Row(
-            [
-                ft.Checkbox(
-                    value=False,
-                    active_color=ft.Colors.PRIMARY,
-                    on_change=lambda e, i=item_id: self._on_toggle(e, i),
+        rows = [
+            ft.Container(
+                padding=ft.Padding(left=8, right=4, top=9, bottom=9),
+                content=ft.Row(
+                    [
+                        ft.Checkbox(
+                            value=False,
+                            active_color=ft.Colors.PRIMARY,
+                            on_change=lambda e, i=item_id: self._on_toggle(e, i),
+                        ),
+                        ft.Container(
+                            expand=True,
+                            on_click=lambda e, i=item_id: self._enter_children(i),
+                            on_long_press=lambda e, i=item_id: self._open_edit(i),
+                            content=ft.Column(
+                                [
+                                    ft.Text(root["title"], size=17,
+                                            weight=ft.FontWeight.W_600,
+                                            max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                                    ft.Row(meta, spacing=8) if meta else None,
+                                ],
+                                spacing=4,
+                            ),
+                        ),
+                        self._item_menu(item_id, bool(kids)),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.Container(
-                    expand=True,
-                    on_click=lambda e, i=item_id: self._enter_children(i),
-                    on_long_press=lambda e, i=item_id: self._open_edit(i),
-                    content=ft.Column(
-                        [
-                            ft.Text(root["title"], size=18, weight=ft.FontWeight.BOLD,
-                                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.Row(header_meta, spacing=8),
-                        ],
-                        spacing=4,
-                    ),
-                ),
-                self._item_menu(item_id, bool(kids)),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+            )
+        ]
+        for k in kids:
+            rows.append(self._level2_row(k))
+        return ft.Column(rows, spacing=0, tight=True)
 
-        inner = [header]
-        if kids:
-            inner.append(ft.Divider(height=1, color=ft.Colors.with_opacity(0.2, ft.Colors.BLUE_GREY_300)))
-            for k in kids:
-                inner.append(self._child_row(k))
-        return self._card(
-            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
-            content=ft.Column(inner, spacing=0, tight=True),
-        )
-
-    def _child_row(self, it):
+    def _level2_row(self, it):
+        """第二层项目行：小字号 + 缩进 + 左侧细条表示从属，无框。"""
         item_id = it["id"]
         has_children = self.db.has_children(item_id)
         meta = []
@@ -791,9 +796,13 @@ class TaskApp:
         if rp:
             meta.append(rp)
         return ft.Container(
-            padding=ft.Padding(left=8, right=4, top=3, bottom=3),
+            padding=ft.Padding(left=40, right=4, top=4, bottom=4),
             content=ft.Row(
                 [
+                    ft.Container(
+                        width=3, height=18, border_radius=2,
+                        bgcolor=ft.Colors.with_opacity(0.55, ft.Colors.LIGHT_BLUE_300),
+                    ),
                     ft.Checkbox(
                         value=False,
                         active_color=ft.Colors.PRIMARY,
@@ -805,7 +814,7 @@ class TaskApp:
                         on_long_press=lambda e, i=item_id: self._open_edit(i),
                         content=ft.Column(
                             [
-                                ft.Text(it["title"], size=13, max_lines=1,
+                                ft.Text(it["title"], size=14, max_lines=1,
                                         overflow=ft.TextOverflow.ELLIPSIS),
                                 ft.Row(meta, spacing=8) if meta else None,
                             ],
@@ -814,6 +823,7 @@ class TaskApp:
                     ),
                     self._item_menu(item_id, has_children),
                 ],
+                spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
@@ -823,36 +833,35 @@ class TaskApp:
         item_id = root["id"]
         kids = self.db.children(item_id)
         self._sort_items(kids)
-        header = ft.Row(
-            [
-                ft.Checkbox(
-                    value=True,
-                    active_color=ft.Colors.PRIMARY,
-                    on_change=lambda e, i=item_id: self._undo_completed(i),
+        rows = [
+            ft.Container(
+                padding=ft.Padding(left=8, right=4, top=8, bottom=8),
+                content=ft.Row(
+                    [
+                        ft.Checkbox(
+                            value=True,
+                            active_color=ft.Colors.PRIMARY,
+                            on_change=lambda e, i=item_id: self._undo_completed(i),
+                        ),
+                        ft.Container(
+                            expand=True,
+                            content=ft.Text(
+                                root["title"], size=17, weight=ft.FontWeight.W_600,
+                                style=ft.TextStyle(
+                                    decoration=ft.TextDecoration.LINE_THROUGH,
+                                    color=ft.Colors.GREY),
+                                max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ),
+                        self._item_menu(item_id, bool(kids), done_ctx=True),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.Container(
-                    expand=True,
-                    content=ft.Text(
-                        root["title"], size=18, weight=ft.FontWeight.BOLD,
-                        style=ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH,
-                                            color=ft.Colors.GREY),
-                        max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                ),
-                self._item_menu(item_id, bool(kids), done_ctx=True),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        inner = [header]
-        if kids:
-            inner.append(ft.Divider(height=1, color=ft.Colors.with_opacity(0.2, ft.Colors.BLUE_GREY_300)))
-            for k in kids:
-                inner.append(self._done_child_row(k))
-        return self._card(
-            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
-            opacity=0.75,
-            content=ft.Column(inner, spacing=0, tight=True),
-        )
+            )
+        ]
+        for k in kids:
+            rows.append(self._done_child_row(k))
+        return ft.Column(rows, spacing=0, tight=True)
 
     def _done_child_row(self, it):
         item_id = it["id"]
@@ -860,15 +869,19 @@ class TaskApp:
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
         return ft.Container(
-            padding=ft.Padding(left=8, right=4, top=3, bottom=3),
+            padding=ft.Padding(left=40, right=4, top=4, bottom=4),
             content=ft.Row(
                 [
+                    ft.Container(
+                        width=3, height=18, border_radius=2,
+                        bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.TEAL),
+                    ),
                     ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
                     ft.Container(
                         expand=True,
                         content=ft.Column(
                             [
-                                ft.Text(it["title"], size=13,
+                                ft.Text(it["title"], size=14,
                                         style=ft.TextStyle(
                                             decoration=ft.TextDecoration.LINE_THROUGH,
                                             color=ft.Colors.GREY),
@@ -880,15 +893,15 @@ class TaskApp:
                     ),
                     self._item_menu(item_id, False, done_ctx=True),
                 ],
+                spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
     def _done_row(self, it, parent_title):
         item_id = it["id"]
-        return self._card(
-            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
-            opacity=0.75,
+        return ft.Container(
+            padding=ft.Padding(left=16, right=4, top=6, bottom=6),
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
