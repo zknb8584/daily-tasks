@@ -33,7 +33,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "每日任务"
-APP_VERSION = "v1.0.9"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.0.10"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -795,102 +795,62 @@ class TaskApp:
             min_height=48,
         )
 
-    # ================= 完成区 =================
+    # ================= 完成区（ListTile，与首页一致） =================
     def _done_group(self, root):
         item_id = root["id"]
         kids = self.db.children(item_id)
         self._sort_items(kids)
-        rows = [
-            ft.Container(
-                padding=ft.Padding(left=8, right=4, top=8, bottom=8),
-                content=ft.Row(
-                    [
-                        ft.Checkbox(
-                            value=True,
-                            active_color=ft.Colors.PRIMARY,
-                            on_change=lambda e, i=item_id: self._undo_completed(i),
-                        ),
-                        ft.Container(
-                            expand=True,
-                            content=ft.Text(
-                                root["title"], size=17, weight=ft.FontWeight.W_600,
-                                style=ft.TextStyle(
-                                    decoration=ft.TextDecoration.LINE_THROUGH,
-                                    color=ft.Colors.GREY),
-                                max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
-                            ),
-                        ),
-                        self._item_menu(item_id, bool(kids), done_ctx=True),
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        tiles = [
+            ft.ListTile(
+                leading=ft.Checkbox(
+                    value=True, active_color=ft.Colors.PRIMARY,
+                    on_change=lambda e, i=item_id: self._undo_completed(i),
                 ),
+                title=ft.Text(root["title"], size=17, weight=ft.FontWeight.W_600,
+                              style=ft.TextStyle(
+                                  decoration=ft.TextDecoration.LINE_THROUGH,
+                                  color=ft.Colors.GREY),
+                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                trailing=self._item_menu(item_id, bool(kids), done_ctx=True),
+                min_height=58,
             )
         ]
         for k in kids:
-            rows.append(self._done_child_row(k))
-        return ft.Column(rows, spacing=0, tight=True)
+            tiles.append(self._done_child_row(k))
+        return ft.Column(tiles, spacing=0)
 
     def _done_child_row(self, it):
         item_id = it["id"]
         meta = []
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
-        return ft.Container(
-            padding=ft.Padding(left=40, right=4, top=4, bottom=4),
-            content=ft.Row(
-                [
-                    ft.Container(
-                        width=3, height=18, border_radius=2,
-                        bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.TEAL),
-                    ),
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
-                    ft.Container(
-                        expand=True,
-                        content=ft.Column(
-                            [
-                                ft.Text(it["title"], size=14,
-                                        style=ft.TextStyle(
-                                            decoration=ft.TextDecoration.LINE_THROUGH,
-                                            color=ft.Colors.GREY),
-                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Row(meta, spacing=8) if meta else None,
-                            ],
-                            spacing=2,
-                        ),
-                    ),
-                    self._item_menu(item_id, False, done_ctx=True),
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+        return ft.ListTile(
+            content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
+            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
+            title=ft.Text(it["title"], size=14,
+                          style=ft.TextStyle(
+                              decoration=ft.TextDecoration.LINE_THROUGH,
+                              color=ft.Colors.GREY),
+                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Row(meta, spacing=6) if meta else None,
+            trailing=self._item_menu(item_id, False, done_ctx=True),
+            dense=True,
+            min_height=46,
         )
 
     def _done_row(self, it, parent_title):
         item_id = it["id"]
-        return ft.Container(
-            padding=ft.Padding(left=16, right=4, top=6, bottom=6),
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, size=18, color=ft.Colors.TEAL),
-                    ft.Container(
-                        expand=True,
-                        content=ft.Column(
-                            [
-                                ft.Text(it["title"], size=14,
-                                        style=ft.TextStyle(
-                                            decoration=ft.TextDecoration.LINE_THROUGH,
-                                            color=ft.Colors.GREY),
-                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Text(f"属于：{parent_title}", size=11,
-                                        color=ft.Colors.BLUE_GREY_400),
-                            ],
-                            spacing=2,
-                        ),
-                    ),
-                    self._item_menu(item_id, False, done_ctx=True),
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
+            title=ft.Text(it["title"], size=14,
+                          style=ft.TextStyle(
+                              decoration=ft.TextDecoration.LINE_THROUGH,
+                              color=ft.Colors.GREY),
+                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(f"属于：{parent_title}", size=11,
+                             color=ft.Colors.BLUE_GREY_400),
+            trailing=self._item_menu(item_id, False, done_ctx=True),
+            min_height=52,
         )
 
     # ================= 交互 =================
