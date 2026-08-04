@@ -33,6 +33,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "每日任务"
+APP_VERSION = "v1.0.9"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -451,9 +452,7 @@ class TaskApp:
             self._sort_items(kids)
             controls.append(self._level1_row(r, kids))
             if i < len(roots) - 1:
-                controls.append(ft.Divider(
-                    height=1, color=ft.Colors.with_opacity(0.25, ft.Colors.BLUE_GREY_200),
-                ))
+                controls.append(ft.Container(height=10))   # 项目间留白（无色）
         return controls
 
     def _home_toolbar(self):
@@ -731,7 +730,7 @@ class TaskApp:
 
     # ================= 首页两层分组 =================
     def _level1_row(self, root, kids):
-        """第一层项目行：大字号，无框。"""
+        """第一层项目行：大字号（ListTile，最稳定的原生行组件）。"""
         item_id = root["id"]
         meta = []
         if root["deadline"]:
@@ -748,42 +747,27 @@ class TaskApp:
         if tag:
             meta.append(self._tag_pill(tag))
 
-        rows = [
-            ft.Container(
-                padding=ft.Padding(left=8, right=4, top=9, bottom=9),
-                content=ft.Row(
-                    [
-                        ft.Checkbox(
-                            value=False,
-                            active_color=ft.Colors.PRIMARY,
-                            on_change=lambda e, i=item_id: self._on_toggle(e, i),
-                        ),
-                        ft.Container(
-                            expand=True,
-                            on_click=lambda e, i=item_id: self._enter_children(i),
-                            on_long_press=lambda e, i=item_id: self._open_edit(i),
-                            content=ft.Column(
-                                [
-                                    ft.Text(root["title"], size=17,
-                                            weight=ft.FontWeight.W_600,
-                                            max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                                    ft.Row(meta, spacing=8) if meta else None,
-                                ],
-                                spacing=4,
-                            ),
-                        ),
-                        self._item_menu(item_id, bool(kids)),
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        tiles = [
+            ft.ListTile(
+                leading=ft.Checkbox(
+                    value=False, active_color=ft.Colors.PRIMARY,
+                    on_change=lambda e, i=item_id: self._on_toggle(e, i),
                 ),
+                title=ft.Text(root["title"], size=17, weight=ft.FontWeight.W_600,
+                               max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                subtitle=ft.Row(meta, spacing=6) if meta else None,
+                trailing=self._item_menu(item_id, bool(kids)),
+                on_click=lambda e, i=item_id: self._enter_children(i),
+                on_long_press=lambda e, i=item_id: self._open_edit(i),
+                min_height=62,
             )
         ]
         for k in kids:
-            rows.append(self._level2_row(k))
-        return ft.Column(rows, spacing=0, tight=True)
+            tiles.append(self._level2_row(k))
+        return ft.Column(tiles, spacing=0)
 
     def _level2_row(self, it):
-        """第二层项目行：小字号 + 缩进 + 左侧细条表示从属，无框。"""
+        """第二层项目行：小字号 + 缩进（ListTile）。"""
         item_id = it["id"]
         has_children = self.db.has_children(item_id)
         meta = []
@@ -795,37 +779,20 @@ class TaskApp:
         rp = self._repeat_pill(it)
         if rp:
             meta.append(rp)
-        return ft.Container(
-            padding=ft.Padding(left=40, right=4, top=4, bottom=4),
-            content=ft.Row(
-                [
-                    ft.Container(
-                        width=3, height=18, border_radius=2,
-                        bgcolor=ft.Colors.with_opacity(0.55, ft.Colors.LIGHT_BLUE_300),
-                    ),
-                    ft.Checkbox(
-                        value=False,
-                        active_color=ft.Colors.PRIMARY,
-                        on_change=lambda e, i=item_id: self._on_toggle(e, i),
-                    ),
-                    ft.Container(
-                        expand=True,
-                        on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
-                        on_long_press=lambda e, i=item_id: self._open_edit(i),
-                        content=ft.Column(
-                            [
-                                ft.Text(it["title"], size=14, max_lines=1,
-                                        overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Row(meta, spacing=8) if meta else None,
-                            ],
-                            spacing=2,
-                        ),
-                    ),
-                    self._item_menu(item_id, has_children),
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        return ft.ListTile(
+            content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
+            leading=ft.Checkbox(
+                value=False, active_color=ft.Colors.PRIMARY,
+                on_change=lambda e, i=item_id: self._on_toggle(e, i),
             ),
+            title=ft.Text(it["title"], size=14, max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Row(meta, spacing=6) if meta else None,
+            trailing=self._item_menu(item_id, has_children),
+            on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
+            on_long_press=lambda e, i=item_id: self._open_edit(i),
+            dense=True,
+            min_height=48,
         )
 
     # ================= 完成区 =================
@@ -1393,6 +1360,8 @@ class TaskApp:
             title=ft.Text("设置"),
             content=ft.Column(
                 [
+                    ft.Text(f"版本 {APP_VERSION}", size=12, color=ft.Colors.BLUE_700,
+                            weight=ft.FontWeight.BOLD),
                     ft.Text("数据目录", size=12, color=ft.Colors.GREY),
                     ft.Text(DATA_DIR, size=11, color=ft.Colors.GREY),
                     ft.ListTile(
