@@ -431,6 +431,14 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def items_with_deadline(self):
+        """返回所有设了截止时间的项目（含已完成），供日历按日分组。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM items WHERE deadline != '' ORDER BY deadline"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------------- 设置键值 ----------------
     def get_setting(self, key, default=None):
         with self._conn() as c:

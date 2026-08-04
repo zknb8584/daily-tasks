@@ -319,6 +319,17 @@ def main():
     app._close_search()
     assert app._search_mode is False
 
+    # ---- 日历视图 ----
+    app._open_calendar()
+    assert app._calendar_view is True
+    texts = rendered_texts(app)
+    assert any("年" in t and "月" in t for t in texts), texts   # 月份导航
+    # 选中今天，应列出当天截止任务（C 过期项目是当天? 不一定，先只验证不崩溃）
+    app._calendar_prev(None)
+    app._calendar_next(None)
+    app._close_calendar()
+    assert app._calendar_view is False
+
     # ---- 备注 ----
     db.update(c, note="备注测试内容")
     assert db.get(c)["note"] == "备注测试内容"

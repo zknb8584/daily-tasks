@@ -21,6 +21,7 @@
   python main.py --selftest  # 无界面自检（数据层 + 通知 + 备份）
 """
 import base64
+import calendar as _cal
 import datetime as dt
 import io
 import os
@@ -33,7 +34,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "每日任务"
-APP_VERSION = "v1.0.10"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.0.11"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -137,6 +138,11 @@ class TaskApp:
         self._search_query = ""         # 搜索关键词
         self._search_field = None       # 搜索输入框（保持引用避免失焦）
         self._search_results = None     # 搜索结果列
+        self._calendar_view = False     # 是否在日历视图
+        today = dt.date.today()
+        self._calendar_year = today.year
+        self._calendar_month = today.month
+        self._selected_day = today      # 日历选中的日期
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
         self._title_field = None
@@ -226,6 +232,9 @@ class TaskApp:
         elif self._search_mode:
             self._update_appbar(None, "搜索", search=True)
             self.scroll.controls = self._render_search()
+        elif self._calendar_view:
+            self._update_appbar(None, "日历", calendar=True)
+            self.scroll.controls = self._render_calendar()
         else:
             parent_id, title = self._current()
             self._update_appbar(parent_id, title)
@@ -233,10 +242,10 @@ class TaskApp:
                 self.scroll.controls = self._render_home()
             else:
                 self.scroll.controls = self._render_level(parent_id)
-        self._set_fab(not (self._show_done or self._search_mode))
+        self._set_fab(not (self._show_done or self._search_mode or self._calendar_view))
         self.page.update()
 
-    def _update_appbar(self, parent_id, title, done=False, search=False):
+    def _update_appbar(self, parent_id, title, done=False, search=False, calendar=False):
         if done:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
@@ -251,6 +260,13 @@ class TaskApp:
             )
             self.page.appbar.title = ft.Text("搜索")
             self.page.appbar.actions = [self._settings_icon()]
+        elif calendar:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_calendar,
+            )
+            self.page.appbar.title = ft.Text("日历")
+            self.page.appbar.actions = [self._settings_icon()]
         else:
             self.page.appbar.leading = (
                 ft.IconButton(
@@ -262,8 +278,15 @@ class TaskApp:
             )
             self.page.appbar.title = ft.Text(title)
             self.page.appbar.actions = [
-                self._search_icon(), self._done_icon(), self._settings_icon(),
+                self._search_icon(), self._calendar_icon(),
+                self._done_icon(), self._settings_icon(),
             ]
+
+    def _calendar_icon(self):
+        return ft.IconButton(
+            icon=ft.Icons.CALENDAR_MONTH, tooltip="日历",
+            icon_color=ft.Colors.ON_PRIMARY, on_click=self._open_calendar,
+        )
 
     def _search_icon(self):
         return ft.IconButton(
@@ -385,6 +408,144 @@ class TaskApp:
             self._enter_children(item_id)
         else:
             self._open_edit(item_id)
+
+    # ---------- 日历 ----------
+    def _open_calendar(self, e=None):
+        self._calendar_view = True
+        self._render()
+
+    def _close_calendar(self, e=None):
+        self._calendar_view = False
+        self._render()
+
+    def _calendar_items_by_day(self):
+        """返回 {date: [items, ...]}（仅当月内截止日期）。"""
+        by_day = {}
+        for it in self.db.items_with_deadline():
+            d = parse_deadline(it["deadline"])
+            if d is None:
+                continue
+            key = d.date()
+            by_day.setdefault(key, []).append(it)
+        return by_day
+
+    def _calendar_prev(self, e):
+        self._calendar_month -= 1
+        if self._calendar_month < 1:
+            self._calendar_month = 12
+            self._calendar_year -= 1
+        self._render()
+
+    def _calendar_next(self, e):
+        self._calendar_month += 1
+        if self._calendar_month > 12:
+            self._calendar_month = 1
+            self._calendar_year += 1
+        self._render()
+
+    def _select_day(self, day):
+        self._selected_day = day
+        self._render()
+
+    def _render_calendar(self):
+        by_day = self._calendar_items_by_day()
+        today = dt.date.today()
+        controls = []
+
+        # 月份导航
+        controls.append(ft.Row(
+            [
+                ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, on_click=self._calendar_prev),
+                ft.Text(f"{self._calendar_year}年{self._calendar_month}月",
+                        size=16, weight=ft.FontWeight.BOLD),
+                ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, on_click=self._calendar_next),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=8,
+        ))
+
+        # 星期标题（周一开头）
+        controls.append(ft.Row(
+            [ft.Text(w, size=12, color=ft.Colors.BLUE_GREY_500,
+                     width=52, text_align=ft.TextAlign.CENTER)
+             for w in ["一", "二", "三", "四", "五", "六", "日"]],
+            alignment=ft.MainAxisAlignment.CENTER,
+        ))
+
+        # 月历格子
+        cal = _cal.Calendar(firstweekday=0)  # 周一开头
+        for week in cal.monthdatescalendar(self._calendar_year, self._calendar_month):
+            controls.append(ft.Row(
+                [self._calendar_cell(day, by_day, today) for day in week],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ))
+
+        controls.append(ft.Container(height=6))
+
+        # 选中日任务列表
+        sd = self._selected_day
+        if sd is not None and (sd.year, sd.month) == (self._calendar_year, self._calendar_month):
+            controls.append(self._section_title(
+                f"{sd.month}月{sd.day}日 任务 ({len(by_day.get(sd, []))})"))
+            items = by_day.get(sd, [])
+            if not items:
+                controls.append(self._hint_text("当天没有截止任务"))
+            for it in items:
+                controls.append(self._calendar_day_row(it))
+        else:
+            controls.append(self._hint_text("点选日期查看当天任务"))
+
+        return controls
+
+    def _calendar_cell(self, day, by_day, today):
+        if day.month != self._calendar_month:
+            return ft.Container(width=52, height=52)   # 跨月留白
+        count = len(by_day.get(day, []))
+        is_today = (day == today)
+        is_selected = (self._selected_day == day)
+        return ft.Container(
+            width=52, height=52,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=ft.Colors.PRIMARY if is_selected else (
+                ft.Colors.with_opacity(0.12, ft.Colors.PRIMARY) if is_today else None
+            ),
+            border_radius=10,
+            on_click=lambda e, d=day: self._select_day(d),
+            content=ft.Column(
+                [
+                    ft.Text(str(day.day), size=15,
+                            weight=ft.FontWeight.BOLD if (is_today or is_selected) else None,
+                            color=ft.Colors.ON_PRIMARY if is_selected else None),
+                    ft.Container(
+                        width=6, height=6, border_radius=3,
+                        bgcolor=ft.Colors.BLUE_600 if count else ft.Colors.TRANSPARENT,
+                    ) if count else ft.Container(width=6, height=6),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=2,
+            ),
+        )
+
+    def _calendar_day_row(self, it):
+        item_id = it["id"]
+        done = bool(it["done"])
+        title_style = None
+        if done:
+            title_style = ft.TextStyle(
+                decoration=ft.TextDecoration.LINE_THROUGH, color=ft.Colors.GREY)
+        return ft.ListTile(
+            content_padding=ft.Padding(left=16, right=8, top=0, bottom=0),
+            leading=ft.Checkbox(
+                value=done, active_color=ft.Colors.PRIMARY,
+                on_change=lambda e, i=item_id: self._on_toggle(e, i),
+            ),
+            title=ft.Text(it["title"], size=14, style=title_style,
+                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=self._deadline_pill(it["deadline"]) if it["deadline"] else None,
+            trailing=self._item_menu(item_id, self.db.has_children(item_id)),
+            dense=True,
+            min_height=48,
+        )
 
     # ---------- 排序 / 截止时间辅助 ----------
     def _own_deadline_ts(self, it):
@@ -870,6 +1031,10 @@ class TaskApp:
     def _back(self, e=None):
         if self._show_done:
             self._close_done()
+        elif self._search_mode:
+            self._close_search()
+        elif self._calendar_view:
+            self._close_calendar()
         elif self.stack:
             self.stack.pop()
             self._render()
