@@ -48,7 +48,7 @@ jobs:
         run: |
           flet build apk \
             --project daily_tasks \
-            --product "每日任务" \
+            --product "天野陽菜" \
             --org com.example \
             --bundle-id com.example.daily_tasks \
             --build-version 1.0.0 \
