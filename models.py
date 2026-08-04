@@ -79,6 +79,25 @@ def parse_deadline(s) -> dt.datetime | None:
     return None
 
 
+def next_deadline(s, repeat_type="", repeat_interval=1):
+    """重复任务完成后的下一个截止时间（存储格式串）；无截止或无重复返回原值。"""
+    d = parse_deadline(s)
+    if d is None:
+        return s
+    if repeat_type == "daily":
+        d = d + dt.timedelta(days=1)
+    elif repeat_type == "weekly":
+        d = d + dt.timedelta(days=7)
+    elif repeat_type == "interval":
+        d = d + dt.timedelta(days=max(1, int(repeat_interval or 1)))
+    else:
+        return s
+    has_time = " " in str(s).strip()
+    if has_time:
+        return d.strftime("%Y-%m-%d %H:%M")
+    return d.strftime("%Y-%m-%d")
+
+
 def fmt_deadline(s) -> str:
     """把存储字符串显示成中文友好的文本。"""
     d = parse_deadline(s)
@@ -135,10 +154,24 @@ class Database:
                     color INTEGER DEFAULT 0
                 )"""
             )
-            # 迁移：给 items 补 tag_id 列（老库升级用）
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS completions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER,
+                    done_at TEXT NOT NULL
+                )"""
+            )
+            # 迁移：给 items 补新列（老库升级用）
             cols = [r["name"] for r in c.execute("PRAGMA table_info(items)")]
-            if "tag_id" not in cols:
-                c.execute("ALTER TABLE items ADD COLUMN tag_id INTEGER")
+            col_sql = {
+                "tag_id": "INTEGER",
+                "note": "TEXT DEFAULT ''",
+                "repeat_type": "TEXT DEFAULT ''",
+                "repeat_interval": "INTEGER DEFAULT 0",
+            }
+            for name, typ in col_sql.items():
+                if name not in cols:
+                    c.execute(f"ALTER TABLE items ADD COLUMN {name} {typ}")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -150,12 +183,13 @@ class Database:
             )
             return cur.lastrowid
 
-    def update(self, item_id, title=None, deadline=None):
+    def update(self, item_id, **fields):
+        """通用字段更新：title / deadline / note / repeat_type / repeat_interval。"""
         sets, vals = [], []
-        if title is not None:
-            sets.append("title=?"); vals.append(title)
-        if deadline is not None:
-            sets.append("deadline=?"); vals.append(deadline)
+        for k, v in fields.items():
+            if v is not None:
+                sets.append(f"{k}=?")
+                vals.append(v)
         if not sets:
             return
         vals.append(item_id)
@@ -225,6 +259,81 @@ class Database:
         tid = self.get_or_create_tag(tag_name) if (tag_name or "").strip() else None
         with self._conn() as c:
             c.execute("UPDATE items SET tag_id=? WHERE id=?", (tid, item_id))
+
+    # ---------------- 搜索 ----------------
+    def search_items(self, q: str):
+        """按标题模糊搜索全部任务（含子任务）。"""
+        q = (q or "").strip()
+        if not q:
+            return []
+        like = f"%{q}%"
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM items WHERE title LIKE ? COLLATE NOCASE ORDER BY created_at",
+                (like,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def title_path(self, item_id):
+        """返回标题路径，如 毕业论文 › 方法论。"""
+        parts = []
+        cur = self.get(item_id)
+        seen = set()
+        while cur and cur["id"] not in seen:
+            seen.add(cur["id"])
+            parts.append(cur["title"])
+            pid = cur.get("parent_id")
+            cur = self.get(pid) if pid is not None else None
+        return " › ".join(reversed(parts))
+
+    # ---------------- 完成日志 / 统计 ----------------
+    def log_completion(self, item_id):
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO completions(item_id, done_at) VALUES(?,?)",
+                (item_id, dt.datetime.now().isoformat(timespec="seconds")),
+            )
+
+    def log_completions(self, ids):
+        if not ids:
+            return
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO completions(item_id, done_at) VALUES(?,?)",
+                [(i, now) for i in ids],
+            )
+
+    def stats_overview(self):
+        """统计概览：总任务/已完成/进行中/本周完成/连续打卡天数。"""
+        today = dt.date.today()
+        week_ago = today - dt.timedelta(days=7)
+        with self._conn() as c:
+            total = c.execute("SELECT COUNT(*) n FROM items").fetchone()["n"]
+            done = c.execute("SELECT COUNT(*) n FROM items WHERE done=1").fetchone()["n"]
+            week_done = c.execute(
+                "SELECT COUNT(*) n FROM completions WHERE done_at >= ?",
+                (dt.datetime.combine(week_ago, dt.time.min).isoformat(timespec="seconds"),),
+            ).fetchone()["n"]
+            days = c.execute(
+                "SELECT DISTINCT substr(done_at,1,10) d FROM completions ORDER BY d"
+            ).fetchall()
+        day_set = {r["d"] for r in days}
+        # 连续打卡：从今天（或昨天，若今天还没打卡）往前数
+        streak = 0
+        cursor = today
+        if cursor.isoformat() not in day_set:
+            cursor = today - dt.timedelta(days=1)
+        while cursor.isoformat() in day_set:
+            streak += 1
+            cursor -= dt.timedelta(days=1)
+        return {
+            "total": total,
+            "done": done,
+            "active": total - done,
+            "week_done": week_done,
+            "streak": streak,
+        }
 
     def get(self, item_id):
         with self._conn() as c:
@@ -405,8 +514,9 @@ class Database:
                 )
             for it in items:
                 c.execute(
-                    "INSERT INTO items(id,parent_id,title,deadline,done,created_at,tag_id) "
-                    "VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO items(id,parent_id,title,deadline,done,created_at,"
+                    "tag_id,note,repeat_type,repeat_interval) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
                         it["id"],
                         it.get("parent_id"),
@@ -415,6 +525,9 @@ class Database:
                         1 if it.get("done") else 0,
                         it.get("created_at", ""),
                         it.get("tag_id"),
+                        it.get("note", ""),
+                        it.get("repeat_type", ""),
+                        it.get("repeat_interval", 0),
                     ),
                 )
 
@@ -442,8 +555,8 @@ class Database:
                     continue
                 tag_id = tag_map.get(it.get("tag_id")) if it.get("tag_id") is not None else None
                 new_id = c.execute(
-                    "INSERT INTO items(parent_id,title,deadline,done,created_at,tag_id) "
-                    "VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO items(parent_id,title,deadline,done,created_at,tag_id,"
+                    "note,repeat_type,repeat_interval) VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         id_map.get(it.get("parent_id")),
                         title,
@@ -452,6 +565,9 @@ class Database:
                         it.get("created_at")
                         or dt.datetime.now().isoformat(timespec="seconds"),
                         tag_id,
+                        it.get("note", ""),
+                        it.get("repeat_type", ""),
+                        it.get("repeat_interval", 0),
                     ),
                 ).lastrowid
                 id_map[it["id"]] = new_id

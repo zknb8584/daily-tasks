@@ -306,6 +306,44 @@ def main():
     texts = rendered_texts(app)
     assert any("导入项目A" in t for t in texts), texts
 
+    # ---- 搜索 ----
+    hits = db.search_items("子任务")
+    assert len(hits) >= 1, hits
+    assert db.title_path(hits[0]["id"])
+    app._open_search()
+    assert app._search_mode is True
+    app._search_query = "子任务"
+    app._render()
+    texts = rendered_texts(app)
+    assert any("子任务1" in t for t in texts) or any("子任务2" in t for t in texts), texts
+    app._close_search()
+    assert app._search_mode is False
+
+    # ---- 备注 ----
+    db.update(c, note="备注测试内容")
+    assert db.get(c)["note"] == "备注测试内容"
+    app._open_edit(item_id=c)
+    assert app._note_field is not None and app._note_field.value == "备注测试内容"
+    app.page.pop_dialog()
+    app._render()
+
+    # ---- 统计概览 ----
+    s0 = db.stats_overview()
+    assert s0["total"] >= 5
+    db.log_completion(c)
+    s1 = db.stats_overview()
+    assert s1["week_done"] >= s0["week_done"] + 1, (s0, s1)
+
+    # ---- 重复任务：完成→滚动截止时间+重新武装+记日志 ----
+    db.update(c, repeat_type="daily", repeat_interval=0)
+    before_dl = db.get(c)["deadline"]
+    app._complete_recurring(c, db.get(c))
+    after = db.get(c)
+    assert after["done"] == 0
+    assert after["repeat_type"] == "daily"
+    if before_dl:
+        assert after["deadline"] != before_dl
+
     # ---- async 文件处理器：用 FakePicker 桩 + asyncio.run 覆盖 4 条路径 ----
     # 导出备份
     out = os.path.join(tmp, "out.json")

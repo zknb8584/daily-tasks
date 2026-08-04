@@ -29,7 +29,7 @@ import sys
 
 import flet as ft
 
-from models import DATA_DIR, Database, fmt_deadline, get_quotes, parse_deadline, save_quotes
+from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
 APP_NAME = "每日任务"
@@ -132,6 +132,10 @@ class TaskApp:
         self._show_done = False         # 是否在全局「完成区」界面
         self._tag_filter = None         # 首页标签筛选（None = 全部）
         self._sort_by_deadline = False  # 是否按截止时间排序
+        self._search_mode = False       # 是否在搜索界面
+        self._search_query = ""         # 搜索关键词
+        self._search_field = None       # 搜索输入框（保持引用避免失焦）
+        self._search_results = None     # 搜索结果列
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
         self._title_field = None
@@ -218,6 +222,9 @@ class TaskApp:
         if self._show_done:
             self._update_appbar(None, "完成区", done=True)
             self.scroll.controls = self._render_done()
+        elif self._search_mode:
+            self._update_appbar(None, "搜索", search=True)
+            self.scroll.controls = self._render_search()
         else:
             parent_id, title = self._current()
             self._update_appbar(parent_id, title)
@@ -225,16 +232,23 @@ class TaskApp:
                 self.scroll.controls = self._render_home()
             else:
                 self.scroll.controls = self._render_level(parent_id)
-        self._set_fab(not self._show_done)
+        self._set_fab(not (self._show_done or self._search_mode))
         self.page.update()
 
-    def _update_appbar(self, parent_id, title, done=False):
+    def _update_appbar(self, parent_id, title, done=False, search=False):
         if done:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
                 icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_done,
             )
             self.page.appbar.title = ft.Text("完成区")
+            self.page.appbar.actions = [self._settings_icon()]
+        elif search:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_search,
+            )
+            self.page.appbar.title = ft.Text("搜索")
             self.page.appbar.actions = [self._settings_icon()]
         else:
             self.page.appbar.leading = (
@@ -246,7 +260,15 @@ class TaskApp:
                 else None
             )
             self.page.appbar.title = ft.Text(title)
-            self.page.appbar.actions = [self._done_icon(), self._settings_icon()]
+            self.page.appbar.actions = [
+                self._search_icon(), self._done_icon(), self._settings_icon(),
+            ]
+
+    def _search_icon(self):
+        return ft.IconButton(
+            icon=ft.Icons.SEARCH, tooltip="搜索",
+            icon_color=ft.Colors.ON_PRIMARY, on_click=self._open_search,
+        )
 
     def _done_icon(self):
         return ft.IconButton(
@@ -264,6 +286,104 @@ class TaskApp:
         fab = self.page.floating_action_button
         if fab is not None:
             fab.visible = visible
+
+    # ---------- 搜索 ----------
+    def _open_search(self, e=None):
+        self._search_mode = True
+        self._render()
+
+    def _close_search(self, e=None):
+        self._search_mode = False
+        self._search_field = None
+        self._render()
+
+    def _render_search(self):
+        if self._search_field is None:
+            self._search_field = ft.TextField(
+                value=self._search_query, label="搜索任务",
+                prefix_icon=ft.Icons.SEARCH, autofocus=True,
+                on_change=self._on_search_change,
+            )
+        if self._search_results is None:
+            self._search_results = ft.Column(spacing=0)
+        self._refresh_search_results()
+        return [
+            ft.Container(
+                padding=ft.Padding(left=12, right=12, top=8, bottom=4),
+                content=self._search_field,
+            ),
+            self._search_results,
+        ]
+
+    def _refresh_search_results(self):
+        if self._search_results is not None:
+            self._search_results.controls = self._build_search_results()
+
+    def _build_search_results(self):
+        q = self._search_query.strip()
+        if not q:
+            return [self._hint_text("输入关键词搜索所有任务")]
+        results = self.db.search_items(q)
+        if not results:
+            return [self._hint_text("没有找到匹配的任务")]
+        return [self._search_result_row(it) for it in results]
+
+    def _on_search_change(self, e):
+        self._search_query = e.control.value or ""
+        self._refresh_search_results()
+        try:
+            self._search_results.update()
+        except Exception:
+            pass
+
+    def _search_result_row(self, it):
+        item_id = it["id"]
+        done = bool(it["done"])
+        meta = []
+        if it["deadline"]:
+            meta.append(self._deadline_pill(it["deadline"]))
+        tag = self.db.tag_by_id(it.get("tag_id"))
+        if tag:
+            meta.append(self._tag_pill(tag))
+        title_style = None
+        if done:
+            title_style = ft.TextStyle(
+                decoration=ft.TextDecoration.LINE_THROUGH, color=ft.Colors.GREY
+            )
+        return self._card(
+            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+            content=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.CHECK_CIRCLE if done else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                        color=ft.Colors.TEAL if done else ft.Colors.BLUE_GREY_300,
+                        size=20,
+                    ),
+                    ft.Container(
+                        expand=True,
+                        on_click=lambda e, i=item_id: self._on_search_result_click(i),
+                        content=ft.Column(
+                            [
+                                ft.Text(it["title"], size=15, style=title_style,
+                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(self.db.title_path(item_id), size=11,
+                                        color=ft.Colors.BLUE_GREY_400),
+                                ft.Row(meta, spacing=8) if meta else None,
+                            ],
+                            spacing=3,
+                        ),
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _on_search_result_click(self, item_id):
+        self._close_search()
+        if self.db.has_children(item_id):
+            self._enter_children(item_id)
+        else:
+            self._open_edit(item_id)
 
     # ---------- 排序 / 截止时间辅助 ----------
     def _own_deadline_ts(self, it):
@@ -284,12 +404,39 @@ class TaskApp:
             items.sort(key=lambda it: it["id"])
 
     # ---------- 首页（两层分组） ----------
+    def _stats_card(self):
+        s = self.db.stats_overview()
+        cells = []
+        for label, val in [
+            ("任务", str(s["total"])),
+            ("进行中", str(s["active"])),
+            ("本周完成", str(s["week_done"])),
+            ("连续打卡", f"{s['streak']}天"),
+        ]:
+            cells.append(ft.Column(
+                [
+                    ft.Text(val, size=18, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_800),
+                    ft.Text(label, size=11, color=ft.Colors.BLUE_GREY_500),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2,
+            ))
+        return ft.Container(
+            margin=ft.Margin(left=12, right=12, top=6, bottom=2),
+            padding=ft.Padding(left=8, right=8, top=10, bottom=10),
+            border_radius=12,
+            bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.LIGHT_BLUE_50),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.LIGHT_BLUE_100)),
+            content=ft.Row(cells, alignment=ft.MainAxisAlignment.SPACE_AROUND),
+        )
+
     def _render_home(self):
         controls = []
         if self._quote:
             qc = self._quote_card()
             if qc is not None:
                 controls.append(qc)
+        controls.append(self._stats_card())
         controls.append(self._home_toolbar())
 
         roots = [r for r in self.db.roots() if not r["done"]]
@@ -439,6 +586,12 @@ class TaskApp:
         meta = []
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
+        ni = self._note_icon(it)
+        if ni:
+            meta.append(ni)
+        rp = self._repeat_pill(it)
+        if rp:
+            meta.append(rp)
         if has_children:
             dd, tt = self.db.subtree_stats(item_id)
             meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
@@ -512,6 +665,28 @@ class TaskApp:
             content=ft.Text(name, size=11, color=col, weight=ft.FontWeight.BOLD),
         )
 
+    def _note_icon(self, it):
+        if not (it.get("note") or "").strip():
+            return None
+        return ft.Icon(ft.Icons.NOTES, size=14, color=ft.Colors.BLUE_GREY_400)
+
+    def _repeat_pill(self, it):
+        rt = it.get("repeat_type", "")
+        if not rt:
+            return None
+        if rt == "daily":
+            label = "每天"
+        elif rt == "weekly":
+            label = "每周"
+        else:
+            label = f"每{int(it.get('repeat_interval') or 1)}天"
+        return ft.Container(
+            padding=ft.Padding(left=8, right=8, top=2, bottom=2),
+            border_radius=8,
+            bgcolor=ft.Colors.with_opacity(0.14, ft.Colors.BLUE_GREY_500),
+            content=ft.Text(label, size=11, color=ft.Colors.BLUE_GREY_600),
+        )
+
     def _item_menu(self, item_id, has_children, done_ctx=False):
         menu = [
             ft.PopupMenuItem(
@@ -556,6 +731,12 @@ class TaskApp:
         header_meta = []
         if root["deadline"]:
             header_meta.append(self._deadline_pill(root["deadline"]))
+        ni = self._note_icon(root)
+        if ni:
+            header_meta.append(ni)
+        rp = self._repeat_pill(root)
+        if rp:
+            header_meta.append(rp)
         dd, tt = self.db.subtree_stats(item_id)
         header_meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
         tag = self.db.tag_by_id(root.get("tag_id"))
@@ -603,6 +784,12 @@ class TaskApp:
         meta = []
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
+        ni = self._note_icon(it)
+        if ni:
+            meta.append(ni)
+        rp = self._repeat_pill(it)
+        if rp:
+            meta.append(rp)
         return ft.Container(
             padding=ft.Padding(left=8, right=4, top=3, bottom=3),
             content=ft.Row(
@@ -755,7 +942,7 @@ class TaskApp:
         parent_id = self.stack[-1][0] if self.stack else None
         self._open_edit(parent_id=parent_id)
 
-    # ---- 勾选完成：有子项需确认（防误触）；叶子直接完成 ----
+    # ---- 勾选完成：有子项需确认（防误触）；重复任务滚动；叶子直接完成 ----
     def _on_toggle(self, e, item_id):
         new_val = bool(e.control.value)
         if new_val and self.db.has_children(item_id):
@@ -763,7 +950,28 @@ class TaskApp:
             self.page.update()
             self._confirm_complete_group(item_id)
             return
-        self.db.set_done(item_id, new_val)
+        it = self.db.get(item_id)
+        if new_val and (it.get("repeat_type") or ""):
+            self._complete_recurring(item_id, it)
+            return
+        if new_val:
+            self.db.set_done(item_id, True)
+            self.db.log_completion(item_id)
+        else:
+            self.db.set_done(item_id, False)
+        self._render()
+
+    def _complete_recurring(self, item_id, it):
+        """重复任务完成：滚动截止时间 + 重新武装（不进入完成区），并记完成日志。"""
+        new_dl = next_deadline(
+            it["deadline"], it.get("repeat_type", ""), it.get("repeat_interval", 1)
+        )
+        self.db.update(item_id, deadline=new_dl)
+        self.db.log_completion(item_id)
+        if new_dl:
+            self._toast(f"已完成，下次：{fmt_deadline(new_dl)}")
+        else:
+            self._toast("已完成，明天继续")
         self._render()
 
     def _confirm_complete_group(self, item_id):
@@ -784,7 +992,9 @@ class TaskApp:
 
     def _do_complete_group(self, item_id):
         self.page.pop_dialog()
+        ids = self.db._subtree_ids(item_id)
         self.db.set_subtree_done(item_id, True)
+        self.db.log_completions(ids)
         self._render()
 
     # ---- 完成区 ----
@@ -892,6 +1102,13 @@ class TaskApp:
             ),
         ]
 
+        # 备注
+        self._note_field = ft.TextField(
+            label="备注（可选）", value=(it.get("note", "") if it else ""),
+            multiline=True, min_lines=2, max_lines=4,
+        )
+        body.append(self._note_field)
+
         # 标签选择器（仅第一层大项目可分配标签）
         self._tag_field = None
         is_root = (item_id is None and parent_id is None) or (
@@ -916,6 +1133,29 @@ class TaskApp:
             body.append(self._tag_field)
             if quick:
                 body.append(ft.Row(quick, scroll=ft.ScrollMode.AUTO, spacing=6))
+
+        # 重复任务（仅叶子项）
+        self._repeat_dropdown = None
+        self._repeat_interval_field = None
+        is_leaf = (item_id is None) or (it is not None and not self.db.has_children(item_id))
+        if is_leaf:
+            self._repeat_dropdown = ft.Dropdown(
+                label="重复", value=(it.get("repeat_type", "") if it else ""),
+                options=[
+                    ft.dropdown.Option("", "不重复"),
+                    ft.dropdown.Option("daily", "每天"),
+                    ft.dropdown.Option("weekly", "每周"),
+                    ft.dropdown.Option("interval", "每 N 天"),
+                ],
+            )
+            self._repeat_interval_field = ft.TextField(
+                label="间隔天数", value=str((it.get("repeat_interval", 1) if it else 1) or 1),
+                keyboard_type=ft.KeyboardType.NUMBER, width=90,
+            )
+            body.append(ft.Row(
+                [self._repeat_dropdown, self._repeat_interval_field],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ))
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -998,6 +1238,17 @@ class TaskApp:
         if self._tag_field is not None:   # 仅第一层大项目有标签字段
             tag = (self._tag_field.value or "").strip()
             self.db.set_item_tag(item_id, tag or None)
+        if self._note_field is not None:
+            self.db.update(item_id, note=(self._note_field.value or "").strip())
+        if self._repeat_dropdown is not None:
+            rt = self._repeat_dropdown.value or ""
+            ri = 0
+            if rt == "interval":
+                try:
+                    ri = max(1, int((self._repeat_interval_field.value or "1").strip() or 1))
+                except ValueError:
+                    ri = 1
+            self.db.update(item_id, repeat_type=rt, repeat_interval=ri)
         self.page.pop_dialog()
         self._render()
 
