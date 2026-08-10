@@ -432,6 +432,46 @@ def main():
     wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
     assert isinstance(wrapper, ft.Dismissible)
 
+    # ---- 预览按钮：最后一条无大纲时隐藏，有大纲时显示 ----
+    db.append_ai_message(sid, "assistant", "好的，明白了。")
+    app._ai_input = None
+    app._render()
+    texts = rendered_texts(app)
+    assert not any("预览并生成任务树" in t for t in texts), texts
+    db.append_ai_message(sid, "assistant", "---TASKS---\nAI 测试项目\n  补充任务")
+    app._render()
+    texts = rendered_texts(app)
+    assert any("预览并生成任务树" in t for t in texts), texts
+
+    # ---- 滑动撤销栈：连续删两个，逐个撤销 ----
+    app._dismissed_stack = []
+    t1 = db.add(None, "滑删A")
+    t2 = db.add(None, "滑删B")
+    app._dismiss_delete(t1)
+    app._dismiss_delete(t2)
+    assert db.get(t1) is None and db.get(t2) is None
+    assert len(app._dismissed_stack) == 2
+    app._undo_dismissed()
+    assert any(r["title"] == "滑删B" for r in db.roots()), db.roots()  # 后删的先撤销
+    assert len(app._dismissed_stack) == 1
+    app._undo_dismissed()
+    assert any(r["title"] == "滑删A" for r in db.roots()), db.roots()
+    assert app._dismissed_stack == []
+
+    # ---- 快照/恢复保留完成日志；删除清理孤儿日志（统计不虚增） ----
+    w0 = db.stats_overview()["week_done"]
+    rc = db.add(None, "恢复C")
+    db.log_completion(rc)
+    assert db.stats_overview()["week_done"] == w0 + 1
+    snap2 = db.snapshot_subtree(rc)
+    assert "completions" in snap2 and len(snap2["completions"]) == 1, snap2
+    db.delete(rc)
+    assert db.get(rc) is None
+    assert db.stats_overview()["week_done"] == w0   # 删除后孤儿日志已清理
+    restored = db.restore_subtree(snap2)
+    assert restored is not None
+    assert db.stats_overview()["week_done"] == w0 + 1  # 完成日志随恢复带回来
+
     print("UI TEST OK")
 
 

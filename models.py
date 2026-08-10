@@ -372,6 +372,8 @@ class Database:
         ids = self._subtree_ids(item_id)
         with self._conn() as c:
             c.executemany("DELETE FROM items WHERE id=?", [(i,) for i in ids])
+            q = ",".join("?" * len(ids))
+            c.execute(f"DELETE FROM completions WHERE item_id IN ({q})", ids)
 
     def delete_many(self, ids):
         if not ids:
@@ -379,6 +381,7 @@ class Database:
         q = ",".join("?" * len(ids))
         with self._conn() as c:
             c.execute(f"DELETE FROM items WHERE id IN ({q})", ids)
+            c.execute(f"DELETE FROM completions WHERE item_id IN ({q})", ids)
 
     def children(self, parent_id):
         with self._conn() as c:
@@ -566,14 +569,18 @@ class Database:
 
     # ---------------- 子树快照 / 恢复（滑动删除撤销） ----------------
     def snapshot_subtree(self, item_id) -> dict:
-        """导出整棵子树（含根），供 Dismissible 删除后一键撤销重建。"""
+        """导出整棵子树（含根 + 完成日志），供 Dismissible 删除后一键撤销重建。"""
         ids = self._subtree_ids(item_id)
         q = ",".join("?" * len(ids))
         with self._conn() as c:
             rows = c.execute(
-                f"SELECT * FROM items WHERE id IN ({q})", ids
+                f"SELECT * FROM items WHERE id IN ({q}) ORDER BY id", ids
             ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+            comp = c.execute(
+                f"SELECT item_id, done_at FROM completions WHERE item_id IN ({q}) ORDER BY id",
+                ids,
+            ).fetchall()
+        return {"items": [dict(r) for r in rows], "completions": [dict(r) for r in comp]}
 
     def restore_subtree(self, snapshot: dict) -> int:
         """恢复快照中的整棵子树（自动重映射 id），返回新根 id。"""
@@ -604,6 +611,14 @@ class Database:
                 old_to_new[it["id"]] = cur.lastrowid
                 if it.get("parent_id") is None:
                     new_root = cur.lastrowid
+            # 完成日志重映射到新 id，撤销后统计不丢历史
+            for comp in snapshot.get("completions", []):
+                new_item = old_to_new.get(comp.get("item_id"))
+                if new_item:
+                    c.execute(
+                        "INSERT INTO completions(item_id, done_at) VALUES(?,?)",
+                        (new_item, comp.get("done_at", "")),
+                    )
         return new_root
 
     # ---------------- 自定义背景图 ----------------

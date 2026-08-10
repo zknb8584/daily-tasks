@@ -149,8 +149,7 @@ class TaskApp:
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
-        self._dismissed_snapshot = None # 滑动删除后的子树快照（撤销用）
-        self._dismissed_new_root = None # 撤销重建后的根 id
+        self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
         self._title_field = None
@@ -474,14 +473,19 @@ class TaskApp:
             rows.append(self._ai_message_row(msg, is_last=(i == len(messages) - 1), kind=kind))
 
         if kind == "decompose":
-            rows.append(ft.Container(
-                padding=ft.Padding(left=12, right=12, top=8, bottom=4),
-                content=ft.FilledButton(
-                    content="预览并生成任务树",
-                    icon=ft.Icons.PLAYLIST_ADD,
-                    on_click=lambda e, s=sess["id"]: self._preview_ai_tasks(s),
-                ),
-            ))
+            last_assistant = next(
+                (m for m in reversed(messages) if m["role"] == "assistant"), None
+            )
+            # 只有最后一条 AI 回复里真有可解析的大纲时才显示按钮，避免占位
+            if last_assistant and extract_tasks(last_assistant["content"]):
+                rows.append(ft.Container(
+                    padding=ft.Padding(left=12, right=12, top=8, bottom=4),
+                    content=ft.FilledButton(
+                        content="预览并生成任务树",
+                        icon=ft.Icons.PLAYLIST_ADD,
+                        on_click=lambda e, s=sess["id"]: self._preview_ai_tasks(s),
+                    ),
+                ))
 
         if self._ai_input is None:
             self._ai_input = ft.TextField(
@@ -505,6 +509,7 @@ class TaskApp:
                         icon_color=ft.Colors.WHITE,
                         bgcolor=ft.Colors.BLUE_700,
                         tooltip="发送",
+                        disabled=self._ai_busy,
                         on_click=self._send_ai_message,
                     ),
                 ],
@@ -1320,7 +1325,8 @@ class TaskApp:
             return
         snapshot = self.db.snapshot_subtree(item_id)
         self.db.delete(item_id)
-        self._dismissed_snapshot = snapshot
+        self._dismissed_stack.append(snapshot)
+        self._render()
         self._toast(
             f"已删除「{it['title']}」",
             action_label="撤销",
@@ -1328,11 +1334,24 @@ class TaskApp:
         )
 
     def _undo_dismissed(self):
-        snap = self._dismissed_snapshot
-        self._dismissed_snapshot = None
-        if snap:
-            self.db.restore_subtree(snap)
-            self._render()
+        if not self._dismissed_stack:
+            return
+        snap = self._dismissed_stack.pop()
+        self.db.restore_subtree(snap)
+        self._render()
+        # 还有更早的待撤销删除时，链式弹出下一个撤销提示，可逐个撤回
+        if self._dismissed_stack:
+            nxt = next(
+                (it for it in self._dismissed_stack[-1]["items"]
+                 if it.get("parent_id") is None),
+                None,
+            )
+            title = nxt["title"] if nxt else "项目"
+            self._toast(
+                f"已删除「{title}」",
+                action_label="撤销",
+                on_undo=self._undo_dismissed,
+            )
 
     def _dismiss_complete(self, item_id, done):
         if done:
@@ -2036,11 +2055,12 @@ class TaskApp:
             self._toast("AI 设置已保存")
 
         def test(e):
-            self.db.set_ai_config(
-                base_url=base_field.value, model=model_field.value,
-                api_key=key_field.value,
-            )
-            cfg2 = self.db.get_ai_config()
+            # 只按当前输入测试，不落库（避免「只想试一下」却把填错的 Key 存进去）
+            cfg2 = {
+                "ai_base_url": (base_field.value or "").strip().rstrip("/"),
+                "ai_model": (model_field.value or "").strip(),
+                "ai_api_key": (key_field.value or "").strip(),
+            }
             status.value = "正在测试连接…"
             self.page.update()
             self.page.run_task(self._test_ai_conn, cfg2, status)
