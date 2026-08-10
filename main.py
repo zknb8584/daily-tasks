@@ -192,6 +192,15 @@ class TaskApp:
         except Exception:
             pass
 
+        # 剪贴板 / 分享同样是 Service（0.86 起不再用 page.set_clipboard / page.share）
+        self.clipboard = ft.Clipboard()
+        self.share = ft.Share()
+        try:
+            self.page._services.register_service(self.clipboard)
+            self.page._services.register_service(self.share)
+        except Exception:
+            pass
+
         p.appbar = ft.AppBar(
             leading=None,
             leading_width=48,
@@ -741,9 +750,9 @@ class TaskApp:
                 ] + ([
                     ft.Row([
                         ft.TextButton("复制", icon=ft.Icons.COPY, height=28,
-                                      on_click=lambda e, t=text: self._copy_text(t)),
+                                      on_click=functools.partial(self._copy_text, text=text)),
                         ft.TextButton("分享", icon=ft.Icons.SHARE, height=28,
-                                      on_click=lambda e, t=text: self._share_text(t)),
+                                      on_click=functools.partial(self._share_text, text=text)),
                         ft.TextButton("存为备注", icon=ft.Icons.NOTE_ADD, height=28,
                                       on_click=lambda e, t=text: self._save_ai_note(t)),
                     ], spacing=2),
@@ -861,16 +870,16 @@ class TaskApp:
         self._toast(f"已添加 {n} 个子任务")
 
     # ---- 通用问答：复制 / 分享 / 存为项目备注 ----
-    def _copy_text(self, text):
+    async def _copy_text(self, e, text):
         try:
-            self.page.set_clipboard(text)
-        except Exception:
-            pass
-        self._toast("已复制")
+            await self.clipboard.set(text)
+            self._toast("已复制")
+        except Exception as ex:
+            self._toast(f"复制失败：{ex}")
 
-    def _share_text(self, text):
+    async def _share_text(self, e, text):
         try:
-            self.share.share(text)
+            await self.share.share_text(text)
         except Exception as ex:
             self._toast(f"分享失败：{ex}")
 

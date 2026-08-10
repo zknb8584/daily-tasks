@@ -137,8 +137,9 @@ def main():
     assert pg.theme is not None and pg.theme.color_scheme_seed == ft.Colors.BLUE
     assert pg.appbar.bgcolor == ft.Colors.BLUE_800
 
-    # ---- FilePicker 应注册为服务（非 overlay 渲染，避免红框） ----
-    assert len(pg._services.services) == 1, pg._services.services
+    # ---- FilePicker / Clipboard / Share 应注册为服务（非 overlay 渲染，避免红框） ----
+    svc_names = [type(s).__name__ for s in pg._services.services]
+    assert "FilePicker" in svc_names and "Clipboard" in svc_names and "Share" in svc_names, svc_names
     assert pg.overlay == [], pg.overlay
     assert isinstance(pg._services.services[0], ft.FilePicker)
 
