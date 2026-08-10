@@ -16,6 +16,7 @@ import types
 
 import flet as ft
 
+import ai_client
 import main as appmod
 from models import Database
 
@@ -137,7 +138,7 @@ def main():
     assert pg.appbar.bgcolor == ft.Colors.BLUE_800
 
     # ---- FilePicker 应注册为服务（非 overlay 渲染，避免红框） ----
-    assert len(pg._services.services) == 1, pg._services.services
+    assert len(pg._services.services) >= 2, pg._services.services
     assert pg.overlay == [], pg.overlay
     assert isinstance(pg._services.services[0], ft.FilePicker)
 
@@ -384,6 +385,52 @@ def main():
     asyncio.run(app._set_bg_image(None))
     assert db.get_bg_image() is not None
     db.clear_bg_image()
+
+    # ---- AI：会话 CRUD + 配置 + 技能中心 + 对话页 ----
+    ai_root = db.add(None, "AI 测试项目")
+    db.set_ai_config(base_url="https://api.deepseek.com/v1", model="deepseek-chat",
+                     api_key="sk-test")
+    cfg = db.get_ai_config()
+    assert cfg["ai_base_url"] == "https://api.deepseek.com/v1"
+    assert cfg["ai_model"] == "deepseek-chat"
+    assert cfg["ai_api_key"] == "sk-test"
+    sid = db.create_ai_session("grill_decompose", "AI 测试会话", project_id=ai_root)
+    db.append_ai_message(sid, "user", "项目：AI 测试项目")
+    db.append_ai_message(sid, "assistant", "---TASKS---\nAI 测试项目\n  子步骤1\n  子步骤2")
+    assert len(db.get_ai_messages(sid)) == 2
+    assert len(db.list_ai_sessions()) >= 1
+
+    app._open_ai_center()
+    texts = rendered_texts(app)
+    assert any("AI 拷问拆解" in t for t in texts), texts
+    assert any("AI 测试会话" in t for t in texts), texts
+
+    app._open_ai_session(sid)
+    texts = rendered_texts(app)
+    assert any("子步骤1" in t for t in texts), texts
+    assert any("预览并生成任务树" in t for t in texts), texts
+
+    # ---- AI：任务大纲解析 + 追加落库 ----
+    rows = ai_client.extract_tasks(
+        "请拆解。\n---TASKS---\nAI 测试项目\n  子步骤1\n    子子步骤1\n  子步骤2"
+    )
+    assert rows == [(0, "AI 测试项目"), (1, "子步骤1"), (2, "子子步骤1"), (1, "子步骤2")], rows
+    before_kids = len(db.children(ai_root))
+    before_subtree = len(db._subtree_ids(ai_root))
+    app._apply_ai_tasks(sid, rows, ai_root)
+    assert len(db._subtree_ids(ai_root)) == before_subtree + 3  # 根标题与项目同名，跳过
+
+    # ---- 滑动：子树快照删除 -> 撤销恢复 ----
+    snap = db.snapshot_subtree(ai_root)
+    db.delete(ai_root)
+    assert all(r["id"] != ai_root for r in db.roots())
+    restored_root = db.restore_subtree(snap)
+    assert restored_root is not None
+    assert any(r["title"] == "AI 测试项目" for r in db.roots())
+
+    # ---- 滑动：Dismissible 包装构造不崩 ----
+    wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
+    assert isinstance(wrapper, ft.Dismissible)
 
     print("UI TEST OK")
 

@@ -161,6 +161,25 @@ class Database:
                     done_at TEXT NOT NULL
                 )"""
             )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_sessions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    project_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_messages(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
             # 迁移：给 items 补新列（老库升级用）
             cols = [r["name"] for r in c.execute("PRAGMA table_info(items)")]
             col_sql = {
@@ -454,6 +473,138 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    # ---------------- AI 配置 ----------------
+    AI_DEFAULTS = {
+        "ai_base_url": "https://api.deepseek.com/v1",
+        "ai_model": "deepseek-chat",
+    }
+
+    def get_ai_config(self) -> dict:
+        cfg = dict(self.AI_DEFAULTS)
+        for key in ("ai_base_url", "ai_model", "ai_api_key"):
+            val = self.get_setting(key, "")
+            if val:
+                cfg[key] = val
+        return cfg
+
+    def set_ai_config(self, base_url=None, model=None, api_key=None):
+        if base_url is not None:
+            self.set_setting("ai_base_url", base_url.strip().rstrip("/"))
+        if model is not None:
+            self.set_setting("ai_model", model.strip())
+        if api_key is not None:
+            self.set_setting("ai_api_key", api_key.strip())
+
+    def clear_ai_key(self):
+        self.set_setting("ai_api_key", "")
+
+    # ---------------- AI 会话 ----------------
+    def create_ai_session(self, skill_id: str, title: str, project_id=None) -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_sessions(skill_id,title,project_id,created_at,updated_at) "
+                "VALUES(?,?,?,?,?)",
+                (skill_id, title, project_id, now, now),
+            )
+            return cur.lastrowid
+
+    def list_ai_sessions(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_sessions ORDER BY updated_at DESC LIMIT 200"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_ai_session(self, session_id) -> dict | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def touch_ai_session(self, session_id):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_sessions SET updated_at=? WHERE id=?", (now, session_id)
+            )
+
+    def rename_ai_session(self, session_id, title):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_sessions SET title=?, updated_at=? WHERE id=?",
+                (title, dt.datetime.now().isoformat(timespec="seconds"), session_id),
+            )
+
+    def delete_ai_session(self, session_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_messages WHERE session_id=?", (session_id,))
+            c.execute("DELETE FROM ai_sessions WHERE id=?", (session_id,))
+
+    def append_ai_message(self, session_id, role: str, content: str):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ai_messages(session_id,role,content,created_at) "
+                "VALUES(?,?,?,?)",
+                (session_id, role, content, now),
+            )
+            c.execute(
+                "UPDATE ai_sessions SET updated_at=? WHERE id=?", (now, session_id)
+            )
+
+    def get_ai_messages(self, session_id, limit=200):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_messages WHERE session_id=? "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return list(reversed([dict(r) for r in rows]))
+
+    # ---------------- 子树快照 / 恢复（滑动删除撤销） ----------------
+    def snapshot_subtree(self, item_id) -> dict:
+        """导出整棵子树（含根），供 Dismissible 删除后一键撤销重建。"""
+        ids = self._subtree_ids(item_id)
+        q = ",".join("?" * len(ids))
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT * FROM items WHERE id IN ({q})", ids
+            ).fetchall()
+        return {"items": [dict(r) for r in rows]}
+
+    def restore_subtree(self, snapshot: dict) -> int:
+        """恢复快照中的整棵子树（自动重映射 id），返回新根 id。"""
+        old_to_new = {}
+        new_root = None
+        with self._conn() as c:
+            for it in snapshot.get("items", []):
+                title = str(it.get("title", "")).strip()
+                if not title:
+                    continue
+                parent = old_to_new.get(it.get("parent_id"))
+                cur = c.execute(
+                    "INSERT INTO items(parent_id,title,deadline,done,created_at,"
+                    "tag_id,note,repeat_type,repeat_interval) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        parent,
+                        title,
+                        it.get("deadline", ""),
+                        1 if it.get("done") else 0,
+                        it.get("created_at", ""),
+                        it.get("tag_id"),
+                        it.get("note", ""),
+                        it.get("repeat_type", ""),
+                        it.get("repeat_interval", 0),
+                    ),
+                )
+                old_to_new[it["id"]] = cur.lastrowid
+                if it.get("parent_id") is None:
+                    new_root = cur.lastrowid
+        return new_root
 
     # ---------------- 自定义背景图 ----------------
     def set_bg_image(self, src_path) -> str:
