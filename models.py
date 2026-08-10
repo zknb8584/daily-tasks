@@ -161,6 +161,24 @@ class Database:
                     done_at TEXT NOT NULL
                 )"""
             )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_sessions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_messages(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
             # 迁移：给 items 补新列（老库升级用）
             cols = [r["name"] for r in c.execute("PRAGMA table_info(items)")]
             col_sql = {
@@ -349,10 +367,11 @@ class Database:
         return {r["id"]: dict(r) for r in rows}
 
     def delete(self, item_id):
-        """级联删除整棵子树。"""
+        """级联删除整棵子树（连同其完成日志，避免统计虚增）。"""
         ids = self._subtree_ids(item_id)
         with self._conn() as c:
             c.executemany("DELETE FROM items WHERE id=?", [(i,) for i in ids])
+            c.executemany("DELETE FROM completions WHERE item_id=?", [(i,) for i in ids])
 
     def delete_many(self, ids):
         if not ids:
@@ -360,6 +379,78 @@ class Database:
         q = ",".join("?" * len(ids))
         with self._conn() as c:
             c.execute(f"DELETE FROM items WHERE id IN ({q})", ids)
+            c.execute(f"DELETE FROM completions WHERE item_id IN ({q})", ids)
+
+    # ---------------- 滑动删除撤销（快照 / 恢复） ----------------
+    def snapshot_subtree(self, item_id):
+        """抓取整棵子树（含完成日志），供滑动删除后撤销。
+
+        返回 {"parent_id": 根的外部父 id, "items": [按父先子后...], "completions": [...]}。
+        恢复时以 parent_id 挂回原父节点；items 内旧 id 全部重新分配。
+        """
+        root = self.get(item_id)
+        ids_in_order = []
+        queue = [item_id]
+        while queue:
+            pid = queue.pop(0)                       # 广度优先：父永远先于子
+            ids_in_order.append(pid)
+            for c in self.children(pid):
+                queue.append(c["id"])
+        items = [self.get(i) for i in ids_in_order]
+        items = [it for it in items if it]
+        comps = []
+        if ids_in_order:
+            q = ",".join("?" * len(ids_in_order))
+            with self._conn() as c:
+                comps = [dict(r) for r in c.execute(
+                    f"SELECT item_id, done_at FROM completions WHERE item_id IN ({q}) ORDER BY id",
+                    ids_in_order,
+                )]
+        return {
+            "parent_id": root["parent_id"] if root else None,
+            "items": items,
+            "completions": comps,
+        }
+
+    def restore_subtree(self, snap):
+        """把快照整棵插回：子节点挂到已恢复的新父节点下，根挂回原外部父节点。
+        返回新根 id；快照为空返回 None。"""
+        items = snap.get("items") or []
+        if not items:
+            return None
+        id_map = {}
+        new_root = None
+        with self._conn() as c:
+            for it in items:
+                old_pid = it.get("parent_id")
+                # 父节点在本快照内 → 用重映射后的新 id；否则是外部存活父 → 直接沿用
+                parent = id_map.get(old_pid) if old_pid in id_map else old_pid
+                new_id = c.execute(
+                    "INSERT INTO items(parent_id,title,deadline,done,created_at,"
+                    "tag_id,note,repeat_type,repeat_interval) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        parent,
+                        it.get("title", ""),
+                        it.get("deadline", ""),
+                        1 if it.get("done") else 0,
+                        it.get("created_at", ""),
+                        it.get("tag_id"),
+                        it.get("note", ""),
+                        it.get("repeat_type", ""),
+                        it.get("repeat_interval", 0),
+                    ),
+                ).lastrowid
+                id_map[it["id"]] = new_id
+                if new_root is None:
+                    new_root = new_id
+            for comp in snap.get("completions") or []:
+                ni = id_map.get(comp["item_id"])
+                if ni is not None:
+                    c.execute(
+                        "INSERT INTO completions(item_id, done_at) VALUES(?,?)",
+                        (ni, comp["done_at"]),
+                    )
+        return new_root
 
     def children(self, parent_id):
         with self._conn() as c:
@@ -422,6 +513,37 @@ class Database:
                     stack.append(r["id"])
         return True
 
+    def append_tasks(self, parent_id, rows):
+        """把大纲 [(level, title, deadline), ...] 追加为 parent_id 的子任务。
+
+        level 0 行挂在 parent 下；level N 行挂到最近的 level N-1 节点
+        （跳级时向上就近挂）。返回追加条数。
+        """
+        last_at = {}   # level -> 该层最近插入的节点 id
+        count = 0
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            for level, title, deadline in rows:
+                title = (title or "").strip()
+                if not title:
+                    continue
+                level = max(0, int(level))
+                pid = parent_id
+                if level > 0:
+                    for lv in range(level - 1, -1, -1):   # 就近向上找父
+                        if lv in last_at:
+                            pid = last_at[lv]
+                            break
+                new_id = c.execute(
+                    "INSERT INTO items(parent_id,title,deadline,created_at) VALUES(?,?,?,?)",
+                    (pid, title, deadline or "", now),
+                ).lastrowid
+                for lv in [k for k in last_at if k >= level]:   # 本层及更深作废
+                    del last_at[lv]
+                last_at[level] = new_id
+                count += 1
+        return count
+
     # ---------------- 通知扫描 ----------------
     def due_items(self):
         """返回所有未完成且设了截止时间的项目。"""
@@ -454,6 +576,74 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    # ---------------- AI 助手 ----------------
+    AI_DEFAULT_BASE = "https://api.deepseek.com"
+    AI_DEFAULT_MODEL = "deepseek-chat"
+
+    def ai_config(self):
+        """读取 AI 配置（Base URL / 模型 / Key）。Key 只存本机。"""
+        return {
+            "base_url": self.get_setting("ai_base_url", self.AI_DEFAULT_BASE),
+            "model": self.get_setting("ai_model", self.AI_DEFAULT_MODEL),
+            "api_key": self.get_setting("ai_api_key", ""),
+        }
+
+    def save_ai_config(self, base_url, model, api_key):
+        self.set_setting("ai_base_url", (base_url or "").strip().rstrip("/"))
+        self.set_setting("ai_model", (model or "").strip())
+        self.set_setting("ai_api_key", (api_key or "").strip())
+
+    def clear_ai_key(self):
+        self.set_setting("ai_api_key", "")
+
+    def create_ai_session(self, skill, title="") -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            return c.execute(
+                "INSERT INTO ai_sessions(skill,title,created_at,updated_at) VALUES(?,?,?,?)",
+                (skill, title, now, now),
+            ).lastrowid
+
+    def get_ai_session(self, session_id):
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def ai_sessions(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_sessions ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_ai_session_title(self, session_id, title):
+        with self._conn() as c:
+            c.execute("UPDATE ai_sessions SET title=? WHERE id=?", (title, session_id))
+
+    def delete_ai_session(self, session_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_sessions WHERE id=?", (session_id,))
+            c.execute("DELETE FROM ai_messages WHERE session_id=?", (session_id,))
+
+    def add_ai_message(self, session_id, role, content):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ai_messages(session_id,role,content,created_at) VALUES(?,?,?,?)",
+                (session_id, role, content, now),
+            )
+            c.execute("UPDATE ai_sessions SET updated_at=? WHERE id=?", (now, session_id))
+
+    def ai_messages_of(self, session_id):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_messages WHERE session_id=? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---------------- 自定义背景图 ----------------
     def set_bg_image(self, src_path) -> str:

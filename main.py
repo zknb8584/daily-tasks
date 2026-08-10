@@ -20,9 +20,11 @@
   python main.py             # 桌面调试
   python main.py --selftest  # 无界面自检（数据层 + 通知 + 备份）
 """
+import asyncio
 import base64
 import calendar as _cal
 import datetime as dt
+import functools
 import io
 import os
 import random
@@ -30,11 +32,12 @@ import sys
 
 import flet as ft
 
+from ai_client import AI_SKILLS, SKILL_BY_ID, chat_completion, extract_tasks
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.0.12"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.1.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -150,6 +153,16 @@ class TaskApp:
         self._dl_label = ft.Text("未设置截止时间", size=13, color=ft.Colors.GREY)
         self._quote = None              # 每日一句（随机选的）
 
+        # ---- v1.1.0：滑动删除撤销栈 + AI 助手状态 ----
+        self._undo_stack = []           # 滑动删除后的子树快照栈（逐个撤销）
+        self._ai_center = False         # 是否在 AI 中心
+        self._ai_session_id = None      # 当前打开的 AI 会话 id（None = 不在对话页）
+        self._ai_project = None         # 当前会话关联的项目 id（项目菜单「AI 拆解」进入）
+        self._ai_busy = False           # 是否正在等待 AI 回复
+        self._ai_input = None           # 对话输入框（保持引用避免失焦）
+        self._pending_tasks = None      # 待预览的 (session_id, [(level,title,deadline), ...])
+        self._settings_dialog_open = False   # AI 设置对话框是否已打开（防重复弹窗）
+
         self._setup()
         self._apply_background()
         self._pick_quote()
@@ -226,7 +239,13 @@ class TaskApp:
         return self.stack[-1]
 
     def _render(self):
-        if self._show_done:
+        if self._ai_session_id is not None:
+            self._update_appbar(None, self._ai_title(), ai_chat=True)
+            self.scroll.controls = self._render_ai_chat()
+        elif self._ai_center:
+            self._update_appbar(None, "AI 中心", ai=True)
+            self.scroll.controls = self._render_ai_center()
+        elif self._show_done:
             self._update_appbar(None, "完成区", done=True)
             self.scroll.controls = self._render_done()
         elif self._search_mode:
@@ -242,16 +261,34 @@ class TaskApp:
                 self.scroll.controls = self._render_home()
             else:
                 self.scroll.controls = self._render_level(parent_id)
-        self._set_fab(not (self._show_done or self._search_mode or self._calendar_view))
+        self._set_fab(not (
+            self._show_done or self._search_mode or self._calendar_view
+            or self._ai_center or self._ai_session_id is not None
+        ))
         self.page.update()
 
-    def _update_appbar(self, parent_id, title, done=False, search=False, calendar=False):
+    def _update_appbar(self, parent_id, title, done=False, search=False, calendar=False,
+                       ai=False, ai_chat=False):
         if done:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
                 icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_done,
             )
             self.page.appbar.title = ft.Text("完成区")
+            self.page.appbar.actions = [self._settings_icon()]
+        elif ai:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_ai_center,
+            )
+            self.page.appbar.title = ft.Text("AI 中心")
+            self.page.appbar.actions = [self._settings_icon()]
+        elif ai_chat:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_ai_chat,
+            )
+            self.page.appbar.title = ft.Text(title)
             self.page.appbar.actions = [self._settings_icon()]
         elif search:
             self.page.appbar.leading = ft.IconButton(
@@ -278,9 +315,15 @@ class TaskApp:
             )
             self.page.appbar.title = ft.Text(title)
             self.page.appbar.actions = [
-                self._search_icon(), self._calendar_icon(),
+                self._ai_icon(), self._search_icon(), self._calendar_icon(),
                 self._done_icon(), self._settings_icon(),
             ]
+
+    def _ai_icon(self):
+        return ft.IconButton(
+            icon=ft.Icons.AUTO_AWESOME, tooltip="AI 助手",
+            icon_color=ft.Colors.ON_PRIMARY, on_click=self._open_ai_center,
+        )
 
     def _calendar_icon(self):
         return ft.IconButton(
@@ -547,6 +590,441 @@ class TaskApp:
             min_height=48,
         )
 
+    # ================= AI 助手 =================
+    _AI_ICON_BY_SKILL = {
+        "grill": ft.Icons.QUESTION_ANSWER,
+        "quick": ft.Icons.BOLT,
+        "chat": ft.Icons.FORUM,
+    }
+
+    def _skill_icon(self, skill_id):
+        return self._AI_ICON_BY_SKILL.get(skill_id, ft.Icons.AUTO_AWESOME)
+
+    def _open_ai_center(self, e=None):
+        self._ai_center = True
+        self._ai_session_id = None
+        self._render()
+
+    def _close_ai_center(self, e=None):
+        self._ai_center = False
+        self._render()
+
+    def _render_ai_center(self):
+        controls = []
+        controls.append(self._section_title("技能"))
+        for s in AI_SKILLS:
+            controls.append(ft.ListTile(
+                leading=ft.Icon(self._skill_icon(s["id"]), color=ft.Colors.BLUE_700),
+                title=ft.Text(s["name"], weight=ft.FontWeight.W_600),
+                subtitle=ft.Text(s["desc"], size=12),
+                trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT, color=ft.Colors.BLUE_GREY_300),
+                on_click=lambda e, sid=s["id"]: self._start_ai_session(sid),
+            ))
+        controls.append(self._section_title("我的会话"))
+        sessions = self.db.ai_sessions()
+        if not sessions:
+            controls.append(self._hint_text("还没有会话，点上方技能开始"))
+        for s in sessions:
+            skill_name = SKILL_BY_ID.get(s["skill"], {}).get("name", "AI 会话")
+            controls.append(ft.ListTile(
+                leading=ft.Icon(ft.Icons.CHAT_BUBBLE_OUTLINE, color=ft.Colors.BLUE_GREY_500),
+                title=ft.Text(s["title"] or skill_name, size=14, max_lines=1,
+                              overflow=ft.TextOverflow.ELLIPSIS),
+                subtitle=ft.Text(f"{skill_name} · {s['updated_at'][:16]}", size=11,
+                                 color=ft.Colors.BLUE_GREY_400),
+                trailing=ft.PopupMenuButton(
+                    icon=ft.Icons.MORE_VERT, icon_color=ft.Colors.BLUE_GREY_600,
+                    items=[ft.PopupMenuItem(
+                        content=ft.Text("删除会话"),
+                        icon=ft.Icons.DELETE,
+                        on_click=lambda e, sid=s["id"]: self._delete_ai_session(sid),
+                    )],
+                ),
+                on_click=lambda e, sid=s["id"]: self._open_ai_session(sid),
+            ))
+        return controls
+
+    def _delete_ai_session(self, session_id):
+        self.db.delete_ai_session(session_id)
+        if self._ai_session_id == session_id:
+            self._ai_session_id = None
+        self._render()
+
+    def _start_ai_session(self, skill_id, project_id=None, context=""):
+        """新建会话并进入对话页。project_id + context 用于「项目菜单 → AI 拆解」。"""
+        sid = self.db.create_ai_session(skill_id)
+        self._ai_session_id = sid
+        self._ai_project = project_id
+        self._ai_center = False
+        self._pending_tasks = None
+        if context:
+            self.db.add_ai_message(sid, "system", context)
+        self._render()
+
+    def _open_ai_session(self, session_id):
+        self._ai_session_id = session_id
+        self._ai_project = None
+        self._pending_tasks = None
+        self._render()
+
+    def _close_ai_chat(self, e=None):
+        self._ai_session_id = None
+        self._ai_project = None
+        self._pending_tasks = None
+        self._render()
+
+    def _ai_title(self):
+        s = self.db.get_ai_session(self._ai_session_id)
+        if not s:
+            return "AI 会话"
+        return s["title"] or SKILL_BY_ID.get(s["skill"], {}).get("name", "AI 会话")
+
+    def _render_ai_chat(self):
+        sid = self._ai_session_id
+        msgs = self.db.ai_messages_of(sid)
+        rows = []
+        for m in msgs:
+            if m["role"] == "system":
+                continue
+            rows.append(self._ai_message_row(m))
+        if self._ai_busy:
+            rows.append(ft.Container(
+                padding=ft.Padding(left=12, right=12, top=4, bottom=4),
+                alignment=ft.Alignment(-1, 0),
+                content=ft.Row(
+                    [ft.ProgressRing(width=14, height=14, stroke_width=2),
+                     ft.Text("正在思考…", size=12, color=ft.Colors.GREY)],
+                    spacing=8,
+                ),
+            ))
+        if self._pending_tasks is not None and self._pending_tasks[0] == sid:
+            rows.append(ft.Container(
+                padding=ft.Padding(left=12, right=12, top=6, bottom=2),
+                content=ft.FilledTonalButton(
+                    icon=ft.Icons.LIST_ALT,
+                    content=ft.Text("预览并生成任务树"),
+                    on_click=lambda e: self._preview_ai_tasks(),
+                ),
+            ))
+
+        scroll = ft.Column(rows, spacing=2, scroll=ft.ScrollMode.AUTO, expand=True)
+        if self._ai_input is None:
+            self._ai_input = ft.TextField(
+                hint_text="输入消息…", multiline=True, min_lines=1, max_lines=4,
+                expand=True,
+            )
+        send = ft.IconButton(
+            icon=ft.Icons.SEND, disabled=self._ai_busy,
+            icon_color=ft.Colors.BLUE_700,
+            on_click=self._send_ai_message,
+        )
+        return [
+            ft.Container(content=scroll, expand=True, padding=ft.Padding(top=6)),
+            ft.Container(
+                content=ft.Row([self._ai_input, send],
+                               vertical_alignment=ft.CrossAxisAlignment.END),
+                padding=ft.Padding(left=8, right=8, top=4, bottom=8),
+            ),
+        ]
+
+    def _ai_message_row(self, m):
+        """对话气泡：用户右蓝、助手左灰；助手气泡带复制/分享/存备注。"""
+        is_user = m["role"] == "user"
+        text = m["content"]
+        bubble = ft.Container(
+            padding=ft.Padding(left=12, right=12, top=8, bottom=8),
+            border_radius=14,
+            bgcolor=ft.Colors.BLUE_50 if is_user else ft.Colors.GREY_100,
+            content=ft.Column(
+                [
+                    ft.Text(text, size=14, selectable=True),
+                ] + ([
+                    ft.Row([
+                        ft.TextButton("复制", icon=ft.Icons.COPY, height=28,
+                                      on_click=lambda e, t=text: self._copy_text(t)),
+                        ft.TextButton("分享", icon=ft.Icons.SHARE, height=28,
+                                      on_click=lambda e, t=text: self._share_text(t)),
+                        ft.TextButton("存为备注", icon=ft.Icons.NOTE_ADD, height=28,
+                                      on_click=lambda e, t=text: self._save_ai_note(t)),
+                    ], spacing=2),
+                ] if not is_user else []),
+                spacing=4,
+            ),
+        )
+        return ft.Container(
+            padding=ft.Padding(left=10, right=10, top=4, bottom=4),
+            alignment=ft.Alignment(-1 if not is_user else 1, 0),
+            content=bubble,
+        )
+
+    async def _send_ai_message(self, e):
+        text = (self._ai_input.value or "").strip()
+        if not text or self._ai_busy:
+            return
+        sid = self._ai_session_id
+        self.db.add_ai_message(sid, "user", text)
+        if self._pending_tasks is not None and self._pending_tasks[0] == sid:
+            self._pending_tasks = None
+        self._ai_input.value = ""
+        s = self.db.get_ai_session(sid)
+        if s and not s["title"]:
+            self.db.set_ai_session_title(
+                sid, text[:12] + ("…" if len(text) > 12 else ""))
+        self._ai_busy = True
+        self._render()
+        try:
+            cfg = self.db.ai_config()
+            msgs = []
+            for m in self.db.ai_messages_of(sid):
+                if m["role"] == "system":
+                    msgs.insert(0, {"role": "system", "content": m["content"]})
+                else:
+                    msgs.append({"role": m["role"], "content": m["content"]})
+            skill = SKILL_BY_ID.get(s["skill"], {})
+            if skill.get("system"):
+                msgs.insert(0, {"role": "system", "content": skill["system"]})
+            ok, result = await asyncio.to_thread(
+                chat_completion, cfg["base_url"], cfg["model"], cfg["api_key"], msgs)
+        except Exception as ex:      # 兜底：异常也当作回复展示
+            ok, result = False, f"AI 请求异常：{ex}"
+        self.db.add_ai_message(sid, "assistant", result)
+        if ok:
+            rows = extract_tasks(result)
+            if rows:
+                self._pending_tasks = (sid, rows)
+        self._ai_busy = False
+        self._render()
+
+    # ---- 生成任务树：预览 → 追加 ----
+    def _preview_ai_tasks(self):
+        if not self._pending_tasks:
+            return
+        sid, rows = self._pending_tasks
+        lines = []
+        for level, title, deadline in rows:
+            prefix = "　" * level
+            lines.append(prefix + title + (f" ｜ {deadline}" if deadline else ""))
+        body = ft.Column(
+            [
+                ft.Text("将追加到项目下，不会覆盖现有子任务：", size=13),
+                ft.Container(
+                    content=ft.Text("\n".join(lines), size=13, selectable=True,
+                                    color=ft.Colors.BLUE_GREY_800),
+                    padding=ft.Padding(10), bgcolor=ft.Colors.GREY_50,
+                    border_radius=8,
+                ),
+            ],
+            tight=True, spacing=8,
+        )
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("预览任务大纲"),
+            content=ft.Container(content=body, width=320),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("确认追加", on_click=lambda e: self._apply_ai_tasks(sid, rows)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _apply_ai_tasks(self, sid, rows):
+        self.page.pop_dialog()
+        pid = self._ai_project
+        if pid is None:
+            roots = [r for r in self.db.roots() if not r["done"]]
+            if not roots:
+                self._toast("还没有项目，先建一个再生成任务树")
+                return
+            dd = ft.Dropdown(
+                label="追加到哪个项目", value=roots[0]["id"],
+                options=[ft.dropdown.Option(r["id"], r["title"]) for r in roots],
+            )
+            def on_ok(e):
+                self.page.pop_dialog()
+                self._apply_ai_tasks_to(dd.value, rows)
+            dlg = ft.AlertDialog(
+                modal=True, title=ft.Text("选择目标项目"),
+                content=dd,
+                actions=[
+                    ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                    ft.FilledButton("确认追加", on_click=on_ok),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self.page.show_dialog(dlg)
+            return
+        self._apply_ai_tasks_to(pid, rows)
+
+    def _apply_ai_tasks_to(self, pid, rows):
+        self._pending_tasks = None
+        n = self.db.append_tasks(pid, rows)
+        self._toast(f"已添加 {n} 个子任务")
+
+    # ---- 通用问答：复制 / 分享 / 存为项目备注 ----
+    def _copy_text(self, text):
+        try:
+            self.page.set_clipboard(text)
+        except Exception:
+            pass
+        self._toast("已复制")
+
+    def _share_text(self, text):
+        try:
+            self.share.share(text)
+        except Exception as ex:
+            self._toast(f"分享失败：{ex}")
+
+    def _save_ai_note(self, text):
+        roots = self.db.roots()
+        if not roots:
+            self._toast("还没有项目可以挂备注")
+            return
+        dd = ft.Dropdown(
+            label="保存到哪个项目", value=roots[0]["id"],
+            options=[ft.dropdown.Option(r["id"], r["title"]) for r in roots],
+        )
+        def on_ok(e):
+            self.page.pop_dialog()
+            self._do_save_ai_note(dd.value, text)
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("存为项目备注"),
+            content=ft.Column([
+                dd,
+                ft.Text("备注会追加到该项目末尾（含「问 AI」来源标记）", size=11,
+                        color=ft.Colors.GREY),
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("保存", on_click=on_ok),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _do_save_ai_note(self, item_id, text):
+        it = self.db.get(item_id)
+        if not it:
+            self._toast("项目不存在")
+            return
+        old = (it.get("note") or "").strip()
+        new = (old + "\n" if old else "") + f"[问 AI] {text}"
+        self.db.update(item_id, note=new)
+        self._toast("已保存到项目备注")
+
+    # ---- 项目菜单「AI 拆解」：带项目上下文进入快速拆解 ----
+    def _start_ai_breakdown(self, item_id):
+        it = self.db.get(item_id)
+        if not it:
+            return
+        ctx = f"项目标题：{it['title']}"
+        if it.get("deadline"):
+            ctx += f"\n截止时间：{fmt_deadline(it['deadline'])}"
+        if it.get("note"):
+            ctx += f"\n项目备注：{it['note']}"
+        kids = self.db.children(item_id)
+        if kids:
+            ctx += "\n已有子任务：\n" + "\n".join(
+                f"- {k['title']}" + (f"（{fmt_deadline(k['deadline'])}）" if k["deadline"] else "")
+                for k in kids
+            )
+        self._start_ai_session("quick", project_id=item_id, context=ctx)
+
+    # ---- AI 设置对话框（Base URL / 模型 / Key / 测试连接 / 清除 Key） ----
+    def _open_ai_settings(self, e=None):
+        if self._settings_dialog_open:
+            return
+        self._settings_dialog_open = True
+        cfg = self.db.ai_config()
+        self._ai_base = ft.TextField(
+            label="Base URL", value=cfg["base_url"],
+            hint_text="https://api.deepseek.com",
+        )
+        self._ai_model = ft.TextField(
+            label="模型", value=cfg["model"], hint_text="deepseek-chat",
+        )
+        self._ai_key = ft.TextField(
+            label="API Key", value=cfg.get("api_key") or "",
+            password=True, can_reveal_password=True,
+            hint_text="只保存在本机数据库，导出备份不会包含",
+        )
+        self._ai_status = ft.Text("", size=12, color=ft.Colors.BLUE_GREY_600)
+        dlg = ft.AlertDialog(
+            modal=True,
+            scrollable=True,
+            title=ft.Text("AI 设置"),
+            content=ft.Column([
+                ft.Text("OpenAI 兼容接口，默认 DeepSeek。", size=12,
+                        color=ft.Colors.GREY),
+                self._ai_base,
+                self._ai_model,
+                self._ai_key,
+                self._ai_status,
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("测试连接",
+                              on_click=lambda e: asyncio.create_task(self._ai_test_connection())),
+                ft.TextButton("清除 Key", on_click=self._ai_clear_key_confirm),
+                ft.TextButton("取消", on_click=self._ai_settings_close),
+                ft.FilledButton("保存", on_click=self._ai_save_config),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            on_dismiss=self._ai_settings_dismissed,
+        )
+        self.page.show_dialog(dlg)
+
+    async def _ai_test_connection(self):
+        self._ai_status.value = "测试中…"
+        self._ai_status.color = ft.Colors.BLUE_GREY_600
+        self.page.update()
+        base = (self._ai_base.value or "").strip()
+        model = (self._ai_model.value or "").strip() or "deepseek-chat"
+        key = (self._ai_key.value or "").strip()
+        ok, msg = await asyncio.to_thread(
+            chat_completion, base, model, key,
+            [{"role": "user", "content": "只回复：连接正常"}], timeout=20,
+        )
+        self._ai_status.value = f"✓ {msg}" if ok else f"✗ {msg}"
+        self._ai_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+        self.page.update()
+
+    def _ai_save_config(self, e):
+        self.db.save_ai_config(
+            (self._ai_base.value or "").strip(),
+            (self._ai_model.value or "").strip(),
+            (self._ai_key.value or "").strip(),
+        )
+        self.page.pop_dialog()
+        self._settings_dialog_open = False
+        self._toast("AI 设置已保存")
+
+    def _ai_clear_key_confirm(self, e):
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("清除 API Key？"),
+            content=ft.Text("清除后 AI 联网对话需要重新填写 Key。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(content="清除", on_click=self._ai_clear_key),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _ai_clear_key(self, e):
+        self.page.pop_dialog()
+        self.db.clear_ai_key()
+        self._ai_key.value = ""
+        self._ai_status.value = "已清除 API Key"
+        self._ai_status.color = ft.Colors.GREY
+        self.page.update()
+
+    def _ai_settings_close(self, e):
+        self.page.pop_dialog()
+        self._settings_dialog_open = False
+
+    def _ai_settings_dismissed(self, e):
+        self._settings_dialog_open = False
+
     # ---------- 排序 / 截止时间辅助 ----------
     def _own_deadline_ts(self, it):
         d = parse_deadline(it["deadline"])
@@ -761,29 +1239,34 @@ class TaskApp:
             meta.append(ft.Text(f"进度 {dd}/{tt}", size=12, color=ft.Colors.BLUE_GREY_400))
         meta_row = ft.Row(meta, spacing=8) if meta else None
 
-        return self._card(
-            margin=ft.Margin(left=12, right=12, top=5, bottom=5),
-            opacity=0.6 if done else 1.0,
-            content=ft.Row(
-                [
-                    ft.Checkbox(
-                        value=done,
-                        active_color=ft.Colors.PRIMARY,
-                        on_change=lambda e, i=item_id: self._on_toggle(e, i),
-                    ),
-                    ft.Container(
-                        expand=True,
-                        on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
-                        on_long_press=lambda e, i=item_id: self._open_edit(i),
-                        content=ft.Column(
-                            [title, meta_row] if meta_row else [title],
-                            spacing=4,
+        return self._dismiss_wrap(
+            item_id,
+            self._card(
+                margin=ft.Margin(left=12, right=12, top=5, bottom=5),
+                opacity=0.6 if done else 1.0,
+                content=ft.Row(
+                    [
+                        ft.Checkbox(
+                            value=done,
+                            active_color=ft.Colors.PRIMARY,
+                            on_change=lambda e, i=item_id: self._on_toggle(e, i),
                         ),
-                    ),
-                    self._item_menu(item_id, has_children),
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ft.Container(
+                            expand=True,
+                            on_click=lambda e, i=item_id, hc=has_children: self._on_row_click(i, hc),
+                            on_long_press=lambda e, i=item_id: self._open_edit(i),
+                            content=ft.Column(
+                                [title, meta_row] if meta_row else [title],
+                                spacing=4,
+                            ),
+                        ),
+                        self._item_menu(item_id, has_children),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
+            done=done,
+            bg_margin=ft.Margin(left=12, right=12, top=5, bottom=5),
         )
 
     def _card(self, margin, opacity=1.0, content=None):
@@ -877,6 +1360,11 @@ class TaskApp:
                 icon=ft.Icons.EDIT,
                 on_click=lambda e, i=item_id: self._open_edit(i),
             ))
+            menu.append(ft.PopupMenuItem(
+                content=ft.Text("AI 拆解"),
+                icon=ft.Icons.AUTO_AWESOME,
+                on_click=lambda e, i=item_id: self._start_ai_breakdown(i),
+            ))
         menu.append(ft.PopupMenuItem(
             content=ft.Text("删除"),
             icon=ft.Icons.DELETE,
@@ -925,6 +1413,7 @@ class TaskApp:
         ]
         for k in kids:
             tiles.append(self._level2_row(k))
+        tiles[0] = self._dismiss_wrap(item_id, tiles[0])   # 第一层行可滑动
         return ft.Column(tiles, spacing=0)
 
     def _level2_row(self, it):
@@ -940,7 +1429,7 @@ class TaskApp:
         rp = self._repeat_pill(it)
         if rp:
             meta.append(rp)
-        return ft.ListTile(
+        return self._dismiss_wrap(item_id, ft.ListTile(
             content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
             leading=ft.Checkbox(
                 value=False, active_color=ft.Colors.PRIMARY,
@@ -954,7 +1443,7 @@ class TaskApp:
             on_long_press=lambda e, i=item_id: self._open_edit(i),
             dense=True,
             min_height=48,
-        )
+        ))
 
     # ================= 完成区（ListTile，与首页一致） =================
     def _done_group(self, root):
@@ -978,6 +1467,7 @@ class TaskApp:
         ]
         for k in kids:
             tiles.append(self._done_child_row(k))
+        tiles[0] = self._dismiss_wrap(item_id, tiles[0], done=True)   # 完成区根行可滑动
         return ft.Column(tiles, spacing=0)
 
     def _done_child_row(self, it):
@@ -985,7 +1475,7 @@ class TaskApp:
         meta = []
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
-        return ft.ListTile(
+        return self._dismiss_wrap(item_id, ft.ListTile(
             content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
             leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
             title=ft.Text(it["title"], size=14,
@@ -997,11 +1487,11 @@ class TaskApp:
             trailing=self._item_menu(item_id, False, done_ctx=True),
             dense=True,
             min_height=46,
-        )
+        ), done=True)
 
     def _done_row(self, it, parent_title):
         item_id = it["id"]
-        return ft.ListTile(
+        return self._dismiss_wrap(item_id, ft.ListTile(
             leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
             title=ft.Text(it["title"], size=14,
                           style=ft.TextStyle(
@@ -1012,7 +1502,7 @@ class TaskApp:
                              color=ft.Colors.BLUE_GREY_400),
             trailing=self._item_menu(item_id, False, done_ctx=True),
             min_height=52,
-        )
+        ), done=True)
 
     # ================= 交互 =================
     def _on_row_click(self, item_id, has_children):
@@ -1029,7 +1519,11 @@ class TaskApp:
         self._render()
 
     def _back(self, e=None):
-        if self._show_done:
+        if self._ai_session_id is not None:
+            self._close_ai_chat()
+        elif self._ai_center:
+            self._close_ai_center()
+        elif self._show_done:
             self._close_done()
         elif self._search_mode:
             self._close_search()
@@ -1178,6 +1672,158 @@ class TaskApp:
     def _do_delete(self, item_id):
         self.page.pop_dialog()
         self.db.delete(item_id)
+        self._render()
+
+    # ================= 滑动操作（左滑删除 / 右滑完成或恢复） =================
+    # 布局：background 在右滑时露出（动作靠左），secondary_background 在左滑时露出（动作靠右）。
+    # 搜索 / 日历等只读列表不包 Dismissible（swipeable=False）。
+    def _dismiss_wrap(self, item_id, child, done=False, swipeable=True, bg_margin=None):
+        if not swipeable:
+            return child
+        m = bg_margin or ft.Margin(left=0, right=0, top=0, bottom=0)
+        bg_color, bg_icon, bg_label = self._swipe_bg(done)
+        def _bg(align, color, icon, label, pad):
+            return ft.Container(
+                alignment=align,
+                padding=pad,
+                margin=m,
+                bgcolor=color,
+                border_radius=12,
+                content=ft.Row(
+                    [ft.Icon(icon, color=ft.Colors.WHITE),
+                     ft.Text(label, color=ft.Colors.WHITE, size=13)],
+                    spacing=6,
+                    alignment=(ft.MainAxisAlignment.END if align == ft.Alignment(1, 0)
+                               else ft.MainAxisAlignment.START),
+                ),
+            )
+        return ft.Dismissible(
+            content=child,
+            dismiss_direction=ft.DismissDirection.HORIZONTAL,
+            dismiss_thresholds={
+                ft.DismissDirection.START_TO_END: 0.35,
+                ft.DismissDirection.END_TO_START: 0.35,
+            },
+            # 右滑（START_TO_END）：完成 / 恢复，动作贴左沿
+            background=_bg(ft.Alignment(-1, 0), bg_color, bg_icon, bg_label,
+                           ft.Padding(left=20)),
+            # 左滑（END_TO_START）：删除，动作贴右沿
+            secondary_background=_bg(ft.Alignment(1, 0), ft.Colors.BLUE_GREY_900,
+                                     ft.Icons.DELETE, "删除", ft.Padding(right=20)),
+            on_confirm_dismiss=functools.partial(self._confirm_swipe,
+                                                 item_id=item_id, done=done),
+            on_dismiss=functools.partial(self._do_swipe, item_id=item_id, done=done),
+        )
+
+    def _swipe_bg(self, done):
+        """右滑背景：未完成=完成（绿），已完成=恢复（青）。"""
+        if done:
+            return (ft.Colors.TEAL, ft.Icons.UNDO, "恢复")
+        return (ft.Colors.GREEN_700, ft.Icons.CHECK_CIRCLE, "完成")
+
+    @staticmethod
+    def _dir_is_left(d):
+        """事件 direction 是否为左滑（END_TO_START）。兼容枚举或字符串。"""
+        if d is None:
+            return False
+        return (d in (ft.DismissDirection.END_TO_START, ft.DismissDirection.END_TO_START.value)
+                or str(d).endswith("END_TO_START"))
+
+    async def _confirm_swipe(self, e, item_id, done):
+        """滑到位的确认：左滑删除直接放行（靠 SnackBar 撤销）；右滑带子项需确认。"""
+        if self._dir_is_left(getattr(e, "direction", None)):
+            await e.control.confirm_dismiss(True)
+            return
+        # 右滑（START_TO_END）
+        it = self.db.get(item_id)
+        if it and not done and self.db.has_children(item_id):
+            fut = asyncio.get_running_loop().create_future()
+            def _yes(ev):
+                if not fut.done():
+                    fut.set_result(True)
+            def _no(ev):
+                if not fut.done():
+                    fut.set_result(False)
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("整个项目都完成了吗？"),
+                content=ft.Text(f"「{it['title']}」\n确认后将连同所有子任务一起移入完成区。"),
+                actions=[
+                    ft.TextButton("取消", on_click=lambda ev: (_no(ev), self.page.pop_dialog())),
+                    ft.FilledButton(content="确认完成",
+                                    on_click=lambda ev: (_yes(ev), self.page.pop_dialog())),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            self.page.show_dialog(dlg)
+            try:
+                ok = await asyncio.wait_for(fut, timeout=15)
+            except asyncio.TimeoutError:
+                ok = False
+                self.page.pop_dialog()
+            await e.control.confirm_dismiss(ok)
+            return
+        await e.control.confirm_dismiss(True)
+
+    def _do_swipe(self, e, item_id, done):
+        direction = getattr(e, "direction", None)
+        if self._dir_is_left(direction):
+            self._swipe_delete(item_id)
+        else:
+            self._swipe_complete(item_id, done)
+
+    def _swipe_delete(self, item_id):
+        it = self.db.get(item_id)
+        if not it:
+            return
+        snap = self.db.snapshot_subtree(item_id)
+        self._undo_stack.append({
+            "item_id": item_id,
+            "title": it["title"],
+            "snap": snap,
+        })
+        if len(self._undo_stack) > 20:
+            self._undo_stack.pop(0)
+        self.db.delete(item_id)   # 级联删除整棵子树（含 completions）
+        self._toast(f"已删除「{it['title']}」", action_label="撤销",
+                    on_undo=functools.partial(self._undo_dismissed, item_id))
+        self._render()
+
+    def _undo_dismissed(self, item_id=None):
+        """SnackBar 撤销：按 item_id 找回快照并整棵恢复。"""
+        entry = None
+        if item_id is not None:
+            for i, x in enumerate(self._undo_stack):
+                if x["item_id"] == item_id:
+                    entry = self._undo_stack.pop(i)
+                    break
+        if entry is None and self._undo_stack:
+            entry = self._undo_stack.pop()
+        if not entry:
+            return
+        self.db.restore_subtree(entry["snap"])
+        self._toast(f"已恢复「{entry['title']}」")
+        self._render()
+
+    def _swipe_complete(self, item_id, done):
+        it = self.db.get(item_id)
+        if not it:
+            return
+        if done:
+            # 完成区：右滑 = 恢复整棵
+            self.db.set_subtree_done(item_id, False)
+            self._toast(f"已恢复「{it['title']}」")
+        elif it.get("repeat_type"):
+            # 重复任务：滚动到下一次截止（不进入完成区）
+            self._complete_recurring(item_id, it)
+            return
+        else:
+            # 右滑完成：整棵（含后代）进完成区，记完成日志
+            ids = self.db._subtree_ids(item_id)
+            self.db.set_subtree_done(item_id, True)
+            self.db.log_completions(ids)
+            self._toast(f"已完成「{it['title']}」", action_label="撤销",
+                        on_undo=functools.partial(self._undo_completed, item_id))
         self._render()
 
     # ================= 新建 / 编辑对话框 =================
@@ -1522,6 +2168,12 @@ class TaskApp:
                         title=ft.Text("导入备份（覆盖现有）"),
                         subtitle=ft.Text("整体还原备份，会替换全部任务", size=11),
                         on_click=self._import,
+                    ),
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.AUTO_AWESOME),
+                        title=ft.Text("AI 设置"),
+                        subtitle=ft.Text("Base URL / 模型 / API Key / 测试连接", size=11),
+                        on_click=self._open_ai_settings,
                     ),
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE),

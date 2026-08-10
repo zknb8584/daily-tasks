@@ -17,6 +17,7 @@ import types
 import flet as ft
 
 import main as appmod
+from ai_client import extract_tasks
 from models import Database
 
 
@@ -384,6 +385,149 @@ def main():
     asyncio.run(app._set_bg_image(None))
     assert db.get_bg_image() is not None
     db.clear_bg_image()
+
+    # ================= v1.1.0 独立复现：滑动 + AI 助手 =================
+
+    # ---- AI 配置读写 ----
+    cfg0 = db.ai_config()
+    assert cfg0["base_url"].startswith("https://"), cfg0
+    db.save_ai_config("https://example.com", "test-model", "sk-test")
+    cfg = db.ai_config()
+    assert cfg["base_url"] == "https://example.com"
+    assert cfg["model"] == "test-model"
+    assert cfg["api_key"] == "sk-test", cfg
+    db.clear_ai_key()
+    assert db.ai_config()["api_key"] == ""
+
+    # ---- AI 会话 CRUD + 消息 ----
+    sid = db.create_ai_session("quick")
+    assert sid is not None
+    assert db.get_ai_session(sid)["skill"] == "quick"
+    db.set_ai_session_title(sid, "会话标题")
+    assert db.get_ai_session(sid)["title"] == "会话标题"
+    db.add_ai_message(sid, "user", "你好")
+    db.add_ai_message(sid, "assistant", "嗨")
+    msgs = db.ai_messages_of(sid)
+    assert [m["role"] for m in msgs] == ["user", "assistant"], msgs
+    assert db.ai_sessions()[0]["id"] == sid          # 最新更新的排最前
+    db.delete_ai_session(sid)
+    assert db.get_ai_session(sid) is None
+    assert db.ai_messages_of(sid) == []
+
+    # ---- extract_tasks 大纲解析 ----
+    outline = "好的，拆解如下：\n---TASKS---\n任务A\n  子A1\n  子A2\n任务B | 2026-08-15\n  子B1 | 2026-08-20 18:00"
+    rows = extract_tasks(outline)
+    assert rows == [
+        (0, "任务A", ""),
+        (1, "子A1", ""),
+        (1, "子A2", ""),
+        (0, "任务B", "2026-08-15"),
+        (1, "子B1", "2026-08-20 18:00"),
+    ], rows
+    assert extract_tasks("没有标记的普通回复") == []
+
+    # ---- AI 中心 / 会话页切换 + 追加任务树 ----
+    app._open_ai_center()
+    assert app._ai_center is True
+    texts = rendered_texts(app)
+    assert any("技能" in t for t in texts), texts
+    assert any("AI 拷问拆解" in t for t in texts), texts
+    app._start_ai_session("quick")
+    assert app._ai_session_id is not None and app._ai_center is False
+    assert app._ai_title() == "快速拆解", app._ai_title()   # 会话页标题在 AppBar
+    # 未配置 Key：发送 → 回复引导文案（不联网）
+    app._ai_input.value = "你好"
+    asyncio.run(app._send_ai_message(FakeEvent(None)))
+    msgs = db.ai_messages_of(app._ai_session_id)
+    assert msgs and msgs[-1]["role"] == "assistant", msgs
+    assert "API Key" in msgs[-1]["content"], msgs[-1]["content"]
+    assert app._ai_busy is False
+    # 项目菜单「AI 拆解」：带上下文注入 system 消息
+    ai_target = db.add(None, "AI 目标项目")
+    app._start_ai_breakdown(ai_target)
+    assert app._ai_project == ai_target
+    sys_msgs = [m for m in db.ai_messages_of(app._ai_session_id) if m["role"] == "system"]
+    assert sys_msgs and "AI 目标项目" in sys_msgs[0]["content"], sys_msgs
+    # 预览并追加：不覆盖已有子任务
+    app._pending_tasks = (app._ai_session_id, rows)
+    app._preview_ai_tasks()
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    app._apply_ai_tasks(app._ai_session_id, rows)
+    kids = db.children(ai_target)
+    assert [k["title"] for k in kids] == ["任务A", "任务B"], kids
+    sub_a = [k for k in kids if k["title"] == "任务A"][0]
+    assert [k["title"] for k in db.children(sub_a["id"])] == ["子A1", "子A2"]
+    sub_b = [k for k in kids if k["title"] == "任务B"][0]
+    assert sub_b["deadline"] == "2026-08-15"
+    assert db.children(sub_b["id"])[0]["deadline"] == "2026-08-20 18:00"
+    app._close_ai_chat()
+    assert app._ai_session_id is None and app._pending_tasks is None
+    db.delete(ai_target)
+
+    # ---- AI 设置对话框：保存 / 重开 ----
+    app._open_ai_settings(None)
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    app._ai_base.value = "https://api.deepseek.com"
+    app._ai_model.value = "deepseek-chat"
+    app._ai_key.value = "sk-测试"
+    app._ai_save_config(None)
+    assert db.ai_config()["base_url"] == "https://api.deepseek.com"
+    assert db.ai_config()["model"] == "deepseek-chat"
+    assert db.ai_config()["api_key"] == "sk-测试"
+    app._open_ai_settings(None)                 # guard 已复位，可再开
+    assert app._settings_dialog_open is True
+    app._ai_settings_close(None)
+    assert app._settings_dialog_open is False
+    db.clear_ai_key()
+
+    # ---- Dismissible 构造：主列表行可滑，搜索行只读 ----
+    dl = app._dismiss_wrap(1, ft.Container(content=ft.Text("x")))
+    assert isinstance(dl, ft.Dismissible)
+    assert dl.dismiss_direction == ft.DismissDirection.HORIZONTAL
+    assert dl.background is not None and dl.secondary_background is not None
+    plain = ft.Container(content=ft.Text("y"))
+    assert app._dismiss_wrap(1, plain, swipeable=False) is plain
+    sr = app._search_result_row(db.get(c))
+    assert not isinstance(sr, ft.Dismissible), type(sr)
+    lvl = app._level1_row(db.get(b), [])
+    assert isinstance(lvl.controls[0], ft.Dismissible), type(lvl.controls[0])
+    assert app._dir_is_left(ft.DismissDirection.END_TO_START) is True
+    assert app._dir_is_left("startToEnd") is False
+    assert app._dir_is_left(None) is False
+
+    # ---- 滑动删除 → SnackBar 撤销：整棵恢复 + completions 一致性 ----
+    p = db.add(None, "滑动删除目标")
+    pc = db.add(p, "滑动子")
+    db.set_done(pc, True)
+    db.log_completion(pc)                            # 记完成日志
+    w0 = db.stats_overview()["week_done"]
+    snap = db.snapshot_subtree(p)
+    assert snap["completions"], snap                 # 快照应含完成日志
+    db.delete(p)
+    assert db.get(p) is None
+    assert db.stats_overview()["week_done"] == w0 - 1  # 删除后日志一并清除（不虚增统计）
+    new_id = db.restore_subtree(snap)
+    assert db.get(new_id)["title"] == "滑动删除目标"
+    child = db.children(new_id)[0]
+    assert child["title"] == "滑动子" and child["done"] == 1
+    # UI 撤销路径：_swipe_delete 入栈 → _undo_dismissed 整棵恢复
+    app._swipe_delete(new_id)
+    assert db.get(new_id) is None
+    assert app._undo_stack and app._undo_stack[-1]["item_id"] == new_id
+    app._undo_dismissed(new_id)
+    assert any(r["title"] == "滑动删除目标" for r in db.roots()), db.roots()
+    # 清理：找恢复后的根删掉
+    for r in db.roots():
+        if r["title"] == "滑动删除目标":
+            db.delete(r["id"])
+
+    # ---- 右滑完成 / 重复任务滚动（走完成路径与 checkbox 一致） ----
+    rc = db.add(None, "重复滑动任务")
+    db.update(rc, repeat_type="daily", repeat_interval=0)
+    app._swipe_complete(rc, done=False)
+    assert db.get(rc)["done"] == 0                   # 重复任务不进入完成区
+    assert db.get(rc)["repeat_type"] == "daily"
+    db.delete(rc)
 
     print("UI TEST OK")
 
