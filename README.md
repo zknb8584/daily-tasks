@@ -43,7 +43,7 @@ task_app/
 
 ## 开发环境（推荐：venv）
 
-依赖已锁版本（`requirements.txt`：flet 0.86.5 + flet-cli + plyer + pillow），推荐用虚拟环境隔离，**不污染全局 Python**：
+依赖已锁版本（`requirements.txt`：flet 0.86.5 + plyer），推荐用虚拟环境隔离，**不污染全局 Python**：
 
 ```bash
 python -m venv .venv                                                       # 首次：创建
@@ -57,7 +57,7 @@ python -m venv .venv                                                       # 首
 激活后 `python` / `pip` 即指向 venv。不激活也能用绝对路径跑：`\.venv\Scripts\python ui_test.py`。
 
 > venv 仅用于本地开发测试；**APK 打包在 CI 里做**（干净环境装同一份 requirements），本地 venv 不影响打包。全局 Python 里的包保持原样，不会被本项目改动。
-> 需要桌面弹窗调试时，额外装一次 `flet-desktop==0.86.5`（不放进 requirements，避免 Android 打包阶段被当作目标依赖打包）。
+> 桌面弹窗调试可额外装 `flet-desktop==0.86.5`；背景图压缩可额外装 `pillow`。这些都不进 requirements，避免被 Android 打包阶段当作目标运行依赖打包（flet-cli 只在 CI 构建机单独安装）。
 
 ## 本地运行（桌面调试）
 

@@ -39,7 +39,9 @@ jobs:
           cache: true
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install flet-cli==0.86.5
 
       - name: Run UI smoke test
         run: python ui_test.py
