@@ -1,2 +1,5 @@
-flet>=0.86,<1.0
-plyer>=2.1
+flet==0.86.5
+flet-cli==0.86.5
+flet-desktop==0.86.5
+plyer==2.1.0
+pillow>=12

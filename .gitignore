@@ -4,6 +4,7 @@ data/
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 # 构建产物（flet build 输出）
 build/

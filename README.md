@@ -39,13 +39,29 @@ task_app/
 └── .github/workflows/build-apk.yml   # GitHub Actions 自动打包
 ```
 
+## 开发环境（推荐：venv）
+
+依赖已锁版本（`requirements.txt`：flet 0.86.5 三件套 + plyer + pillow），推荐用虚拟环境隔离，**不污染全局 Python**：
+
+```bash
+python -m venv .venv                                                       # 首次：创建
+# 之后每次开始开发先激活（Windows）：
+#   PowerShell:  .\.venv\Scripts\Activate.ps1
+#   cmd:         .\.venv\Scripts\activate.bat
+#   Git Bash:    source .venv/Scripts/activate
+\.venv\Scripts\python -m pip install -r requirements.txt                   # 首次：装依赖
+```
+
+激活后 `python` / `pip` 即指向 venv。不激活也能用绝对路径跑：`\.venv\Scripts\python ui_test.py`。
+
+> venv 仅用于本地开发测试；**APK 打包在 CI 里做**（干净环境装同一份 requirements），本地 venv 不影响打包。全局 Python 里的包保持原样，不会被本项目改动。
+
 ## 本地运行（桌面调试）
 
 ```bash
-pip install -r requirements.txt
-python main.py            # 弹出手机竖屏比例窗口
-python main.py --selftest # 无界面自检（数据层 + 通知 + 备份）
-python ui_test.py         # UI 逻辑冒烟测试
+\.venv\Scripts\python main.py            # 弹出手机竖屏比例窗口
+\.venv\Scripts\python main.py --selftest # 无界面自检（数据层 + 通知 + 备份）
+\.venv\Scripts\python ui_test.py         # UI 逻辑冒烟测试
 ```
 
 > 桌面端弹窗需要联网下载 Flet 桌面客户端（GitHub Releases）；若网络不通，
@@ -177,5 +193,5 @@ python gen_backup.py 示例大纲.txt -o 任务备份.json   # 生成计划文�
 
 ## 开发说明
 
-- 本项目针对 **flet 0.86.x** API（`page.show_dialog` / `ft.run` / `StoragePaths` 等）。若升级 Flet 大版本，需同步适配 API 变化。
+- 本项目针对 **flet 0.86.x** API（`page.show_dialog` / `ft.run` / `StoragePaths` 等），`requirements.txt` 已锁定 `flet==0.86.5`。若升级 Flet 大版本，需同步适配 API 变化。
 - 主要功能集中在 `main.py`，`models.py` 纯数据层、不依赖 UI，便于单测。

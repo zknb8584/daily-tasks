@@ -38,8 +38,11 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Install Flet
-        run: pip install flet
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run UI smoke test
+        run: python ui_test.py
 
       - name: Accept Android licenses
         run: yes | flutter doctor --android-licenses || true
