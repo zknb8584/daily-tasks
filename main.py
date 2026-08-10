@@ -567,11 +567,9 @@ class TaskApp:
     async def _send_ai_message(self, e):
         if self._ai_session_id is None or self._ai_busy:
             return
-        text = ""
-        if e is not None:
-            ctrl = getattr(e, "control", None)
-            if ctrl is not None:
-                text = (ctrl.value or "").strip()
+        # 发送按钮的 e.control 是 IconButton，没有 value；
+        # 统一从输入框取值，兼容 on_submit 与 on_click 两种触发方式。
+        text = (self._ai_input.value or "").strip() if self._ai_input is not None else ""
         if text:
             self.db.append_ai_message(self._ai_session_id, "user", text)
             if self._ai_input is not None:
