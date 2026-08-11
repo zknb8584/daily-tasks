@@ -51,7 +51,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.2.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.2.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -2390,7 +2390,9 @@ class TaskApp:
             return
         # 在 AI 对话/搜索输入框里，Delete/Backspace 是删字符，不应触发页面返回
         if key in ("Backspace", "Delete") and (
-            self._ai_session_id is not None or self._search_mode
+            self._ai_session_id is not None
+            or self._ai_group_id is not None
+            or self._search_mode
         ):
             return
         if key in ("Escape", "Backspace"):

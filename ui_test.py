@@ -600,6 +600,8 @@ def main():
 
     app._open_group_chat(group_id)
     app._group_input = ft.TextField(value="@群A 晚上一起打游戏？")
+    app._on_key(types.SimpleNamespace(key="Delete", ctrl=False))
+    assert app._ai_group_id == group_id
     orig_group_chat = appmod.chat_completion
     appmod.chat_completion = lambda *a, **k: "好啊，我带你打。"
     asyncio.run(app._send_group_message(None))
