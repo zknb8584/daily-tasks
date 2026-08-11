@@ -728,6 +728,10 @@ class Database:
 
     def delete_role_card(self, card_id):
         with self._conn() as c:
+            c.execute(
+                "DELETE FROM ai_group_members WHERE role_card_id=?",
+                (card_id,),
+            )
             c.execute("DELETE FROM ai_role_cards WHERE id=?", (card_id,))
 
     def list_ai_sessions(self):
@@ -1082,6 +1086,8 @@ class Database:
                     ),
                 )
             if "role_cards" in data or "worlds" in data:
+                c.execute("DELETE FROM ai_group_messages")
+                c.execute("DELETE FROM ai_group_chats")
                 c.execute("DELETE FROM ai_group_members")
                 c.execute("DELETE FROM ai_role_cards")
                 c.execute("DELETE FROM ai_worlds")

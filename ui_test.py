@@ -661,6 +661,29 @@ def main():
     assert "---PROGRESS---" not in clean_prog
     assert ai_client.extract_scene_change(["场景切换：夜晚"]) == "夜晚"
 
+    # ---- 修复回归：删除角色卡清群成员 / 世界观替换 / 新建拷问世界观 ----
+    del_card_id = db.create_role_card("删除测试", "[核心]\n名字：删除测试")
+    del_group_id = db.create_group_chat("删除群")
+    db.add_group_member(del_group_id, del_card_id)
+    db.delete_role_card(del_card_id)
+    assert db.group_members(del_group_id) == []
+
+    attach_world_id = db.create_world("新世界", "新城")
+    attached = app._attach_world_to_content(
+        "[核心]\n名字：A\n[世界观]\n旧世界\n旧城",
+        attach_world_id,
+    )
+    assert "新世界" in attached
+    assert "旧城" not in attached
+
+    app._begin_role_grill(
+        types.SimpleNamespace(value=""),
+        types.SimpleNamespace(value="新拷问世界"),
+        None,
+    )
+    assert any(w["name"] == "新拷问世界" for w in db.list_worlds())
+    assert db.get_ai_session_meta(app._ai_session_id).get("world_id") is not None
+
     # ---- AI 生成角色卡 ----
     gen_field = ft.TextField(value="一个叫小星的机器人")
     gen_status = ft.Text("")
@@ -779,7 +802,11 @@ def main():
 
     # ---- Grill-me 拷问角色卡：技能、提取、落库 ----
     assert any(s["id"] == "role_grill" for s in ai_client.AI_SKILLS)
-    app._begin_role_grill(types.SimpleNamespace(value=""), None)
+    app._begin_role_grill(
+        types.SimpleNamespace(value=""),
+        types.SimpleNamespace(value=""),
+        None,
+    )
     assert db.get_ai_session(app._ai_session_id)["skill_id"] == "role_grill"
     grilled_card = (
         "总结：角色已经很具体。\n"

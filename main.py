@@ -58,7 +58,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.4.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.4.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -528,10 +528,7 @@ class TaskApp:
                 scroll=ft.ScrollMode.AUTO,
             ),
             actions=[
-                ft.TextButton(
-                    "取消",
-                    on_click=lambda e: self._cancel_role_grill_start(),
-                ),
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton(
                     content="创建群聊",
                     on_click=lambda e: self._create_group_chat(
@@ -968,6 +965,10 @@ class TaskApp:
                 ],
             ],
         )
+        new_world_field = ft.TextField(
+            label="或新建世界观",
+            hint_text="填写后自动新建",
+        )
         start_dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Grill-me 拷问角色卡"),
@@ -976,16 +977,20 @@ class TaskApp:
                     ft.Text("可以先选择世界观，也可以直接开始拷问：", size=13,
                             color=ft.Colors.BLUE_GREY_600),
                     world_dd,
+                    new_world_field,
                 ],
                 tight=True,
                 spacing=10,
             ),
             actions=[
-                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton(
+                    "取消",
+                    on_click=lambda e: self._cancel_role_grill_start(),
+                ),
                 ft.FilledButton(
                     content="开始拷问",
                     on_click=lambda e: self._begin_role_grill(
-                        world_dd, start_dlg
+                        world_dd, new_world_field, start_dlg
                     ),
                 ),
             ],
@@ -997,8 +1002,14 @@ class TaskApp:
         self.page.pop_dialog()
         self._choose_roleplay()
 
-    def _begin_role_grill(self, world_dd, dlg):
+    def _begin_role_grill(self, world_dd, new_world_field, dlg):
         world_id = int(world_dd.value) if world_dd and world_dd.value else None
+        new_world_name = (
+            (new_world_field.value or "").strip()
+            if new_world_field is not None else ""
+        )
+        if new_world_name:
+            world_id = self.db.create_world(new_world_name, "")
         self.page.pop_dialog()
         self._start_ai_session("role_grill")
         if world_id:
@@ -1008,16 +1019,32 @@ class TaskApp:
             if world:
                 meta["summary"] = f"世界观：{world['name']}\n{world['content']}"
             self.db.set_ai_session_meta(self._ai_session_id, meta)
-        self._render()
 
     def _attach_world_to_content(self, content, world_id):
-        sections = parse_role_card(content)
         world = self.db.get_world(world_id) if world_id else None
-        if world and not sections.get("世界观"):
-            content = content.rstrip() + (
-                f"\n\n[世界观]\n{world['name']}\n{world['content']}"
-            ).strip()
+        if world:
+            body = (world["name"] + "\n" + world["content"]).strip()
+            content = self._replace_role_section(content, "世界观", body)
         return content
+
+    def _replace_role_section(self, content, section, body):
+        lines = []
+        in_section = False
+        replaced = False
+        for line in (content or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_section = stripped[1:-1].strip() == section
+                if in_section:
+                    replaced = True
+                    continue
+            if in_section:
+                continue
+            lines.append(line)
+        new_content = "\n".join(lines).rstrip()
+        if replaced or body:
+            new_content += f"\n\n[{section}]\n{body}"
+        return new_content.strip()
 
     def _prompt_import_world(self, name, content):
         self._pending_import = {"name": name, "content": content}
