@@ -37,9 +37,11 @@ from ai_client import (
     build_group_role_system,
     build_role_system,
     chat_completion,
+    extract_bracket_directives,
     extract_load_requests,
     extract_tasks,
     format_group_history,
+    has_remember_directive,
     match_world_book,
     parse_role_card,
     parse_state_block,
@@ -51,7 +53,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.2.1"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.2.2"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -678,17 +680,21 @@ class TaskApp:
         if not members:
             return []
         history = self.db.get_group_messages(group_id, limit=80)
-        if any(k in user_text for k in
-               ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+        user_clean, user_directives = extract_bracket_directives(user_text)
+        remember_directive = has_remember_directive(user_text)
+        if remember_directive:
             for m in members:
                 state = self.db.role_card_state(m["id"])
-                state["记忆"] = (state.get("记忆", "") + "\n" + user_text).strip()
+                directive_text = "\n".join(user_directives)
+                state["记忆"] = (
+                    state.get("记忆", "") + "\n" + directive_text
+                ).strip()
                 state["重要记忆"] = (
-                    state.get("重要记忆", "") + "\n" + user_text
+                    state.get("重要记忆", "") + "\n" + directive_text
                 ).strip()
                 self.db.save_role_card_state(m["id"], state)
 
-        speakers = select_group_speakers(members, user_text, history)
+        speakers = select_group_speakers(members, user_clean or user_text, history)
         context = format_group_history(history)
         replies = []
         cfg = self.db.get_ai_config()
@@ -702,8 +708,12 @@ class TaskApp:
                 system = build_group_role_system(
                     card["content"], state, loaded, members, context
                 )
-                if any(k in user_text for k in
-                       ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+                if user_directives:
+                    system += (
+                        "\n\n[导演指令]\n"
+                        + "\n".join(f"- {d}" for d in user_directives)
+                    )
+                if remember_directive:
                     system += (
                         "\n\n注意：用户本轮明确要求你记住某些内容。"
                         "请把它逐字保留到 ---STATE--- 的 重要记忆= 字段。"
@@ -1409,8 +1419,13 @@ class TaskApp:
                 system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
             if history and history[-1]["role"] == "user":
                 last_text = history[-1]["content"]
-                if any(k in last_text for k in
-                       ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+                _, directives = extract_bracket_directives(last_text)
+                if directives:
+                    system += (
+                        "\n\n[导演指令]\n"
+                        + "\n".join(f"- {d}" for d in directives)
+                    )
+                if has_remember_directive(last_text):
                     system += (
                         "\n\n注意：用户本轮明确要求你记住某些内容。"
                         "请把它逐字保留到 ---STATE--- 的 重要记忆= 字段，不要压缩丢失。"

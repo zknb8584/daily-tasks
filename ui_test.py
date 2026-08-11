@@ -554,7 +554,7 @@ def main():
     wb_sid = db.create_ai_session(
         "roleplay", "世界书测试会话", role_card_id=wb_card_id
     )
-    db.append_ai_message(wb_sid, "user", "我在旧书店门口。")
+    db.append_ai_message(wb_sid, "user", "（场景切换：夜晚）我在旧书店门口。")
     captured_payloads = []
     orig_chat_completion = appmod.chat_completion
     appmod.chat_completion = lambda *a, **k: (
@@ -567,6 +567,8 @@ def main():
     payload = captured_payloads[0]
     assert "只按旧书店规则回复" in payload[0]["content"]
     assert "角落里有扇暗门" in payload[0]["content"]
+    assert "导演指令" in payload[0]["content"]
+    assert "场景切换：夜晚" in payload[0]["content"]
     assert payload[-1]["role"] == "system"
     assert payload[-1]["content"].startswith("[历史后置指令]")
 
@@ -585,9 +587,16 @@ def main():
     assert len(db.get_group_messages(group_id)) == 2
     group_history = ai_client.format_group_history(db.get_group_messages(group_id))
     assert "群A" in group_history
+    clean_text, directives = ai_client.extract_bracket_directives(
+        "（场景切换：晚上）我们在门口见"
+    )
+    assert clean_text == "我们在门口见"
+    assert directives == ["场景切换：晚上"]
+    assert ai_client.has_remember_directive("记住我穿蓝色") is False
+    assert ai_client.has_remember_directive("（记住：我穿蓝色）") is True
     forced = ai_client.select_group_speakers(
         [{"id": group_a_id, "name": "群A", "content": "[爱好]\n主机游戏"}],
-        "@群A 晚上一起打游戏？",
+        "（场景切换：晚上）@群A 一起打游戏？",
     )
     assert forced[0]["id"] == group_a_id
     group_system = ai_client.build_group_role_system(
@@ -597,9 +606,11 @@ def main():
     )
     assert "群聊设定" in group_system
     assert "主机游戏" in group_system
+    assert "用户普通输入" in group_system
+    assert "导演指令" in group_system
 
     app._open_group_chat(group_id)
-    app._group_input = ft.TextField(value="@群A 晚上一起打游戏？")
+    app._group_input = ft.TextField(value="（场景切换：晚上）@群A 一起打游戏？")
     app._on_key(types.SimpleNamespace(key="Delete", ctrl=False))
     assert app._ai_group_id == group_id
     orig_group_chat = appmod.chat_completion
