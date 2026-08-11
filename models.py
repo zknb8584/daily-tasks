@@ -167,8 +167,18 @@ class Database:
                     skill_id TEXT NOT NULL,
                     title TEXT NOT NULL,
                     project_id INTEGER,
+                    role_card_id INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_role_cards(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    state TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL
                 )"""
             )
             c.execute(
@@ -191,6 +201,12 @@ class Database:
             for name, typ in col_sql.items():
                 if name not in cols:
                     c.execute(f"ALTER TABLE items ADD COLUMN {name} {typ}")
+            sess_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_sessions)")]
+            if "role_card_id" not in sess_cols:
+                c.execute("ALTER TABLE ai_sessions ADD COLUMN role_card_id INTEGER")
+            card_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_role_cards)")]
+            if "state" not in card_cols:
+                c.execute("ALTER TABLE ai_role_cards ADD COLUMN state TEXT DEFAULT '{}'")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -503,15 +519,60 @@ class Database:
         self.set_setting("ai_api_key", "")
 
     # ---------------- AI 会话 ----------------
-    def create_ai_session(self, skill_id: str, title: str, project_id=None) -> int:
+    def create_ai_session(self, skill_id: str, title: str, project_id=None,
+                          role_card_id=None) -> int:
         now = dt.datetime.now().isoformat(timespec="seconds")
         with self._conn() as c:
             cur = c.execute(
-                "INSERT INTO ai_sessions(skill_id,title,project_id,created_at,updated_at) "
-                "VALUES(?,?,?,?,?)",
-                (skill_id, title, project_id, now, now),
+                "INSERT INTO ai_sessions(skill_id,title,project_id,role_card_id,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (skill_id, title, project_id, role_card_id, now, now),
             )
             return cur.lastrowid
+
+    def create_role_card(self, name: str, content: str) -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_role_cards(name,content,created_at) VALUES(?,?,?)",
+                (name.strip(), content.strip(), now),
+            )
+            return cur.lastrowid
+
+    def list_role_cards(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_role_cards ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_role_card(self, card_id):
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_role_cards WHERE id=?", (card_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def role_card_state(self, card_id) -> dict:
+        card = self.get_role_card(card_id)
+        if not card:
+            return {}
+        try:
+            state = json.loads(card.get("state") or "{}")
+            return state if isinstance(state, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def save_role_card_state(self, card_id, state: dict):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_role_cards SET state=? WHERE id=?",
+                (json.dumps(state, ensure_ascii=False), card_id),
+            )
+
+    def delete_role_card(self, card_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_role_cards WHERE id=?", (card_id,))
 
     def list_ai_sessions(self):
         with self._conn() as c:

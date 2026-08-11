@@ -31,7 +31,16 @@ import sys
 
 import flet as ft
 
-from ai_client import AI_SKILLS, SKILL_BY_ID, chat_completion, extract_tasks
+from ai_client import (
+    AI_SKILLS,
+    SKILL_BY_ID,
+    build_role_system,
+    chat_completion,
+    extract_load_requests,
+    extract_tasks,
+    parse_role_card,
+    parse_state_block,
+)
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
@@ -149,6 +158,7 @@ class TaskApp:
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
+        self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
@@ -377,7 +387,10 @@ class TaskApp:
                 title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
                 subtitle=ft.Text(skill["description"], size=12),
                 trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, color=ft.Colors.BLUE_700),
-                on_click=lambda e, sid=skill["id"]: self._start_ai_session(sid),
+                on_click=lambda e, sid=skill["id"]: (
+                    self._choose_roleplay() if sid == "roleplay"
+                    else self._start_ai_session(sid)
+                ),
                 min_height=64,
             ))
 
@@ -421,6 +434,154 @@ class TaskApp:
         self.db.delete_ai_session(session_id)
         self._render()
 
+    # ---------- 角色扮演：角色卡 ----------
+    def _choose_roleplay(self):
+        cards = self.db.list_role_cards()
+        dropdown = ft.Dropdown(
+            label="选择角色卡",
+            options=[ft.dropdown.Option(key=c["id"], text=c["name"]) for c in cards],
+            value=cards[0]["id"] if cards else None,
+        )
+        status = ft.Text(
+            "还没有角色卡，先导入一份角色卡文件（txt 或 json）",
+            size=12, color=ft.Colors.BLUE_GREY_600,
+        ) if not cards else ft.Text("", size=12)
+        actions = [
+            ft.TextButton("导入角色卡", on_click=lambda e: self._import_role_card(dlg)),
+            ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+            ft.FilledButton(
+                content="开始对话",
+                on_click=lambda e: self._begin_roleplay(dropdown.value, dlg),
+            ),
+        ]
+        if cards:
+            actions.insert(1, ft.TextButton(
+                "删除所选角色卡",
+                on_click=lambda e: self._delete_selected_role_card(dropdown, dlg),
+            ))
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("开始角色扮演"),
+            content=ft.Column(
+                [
+                    status,
+                    dropdown if cards else ft.Text("暂无角色卡", size=13,
+                                                   color=ft.Colors.GREY),
+                ],
+                tight=True,
+                spacing=10,
+            ),
+            actions=actions,
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _delete_selected_role_card(self, dropdown, dlg):
+        card_id = dropdown.value if dropdown is not None else None
+        if not card_id:
+            self._toast("请先选择要删除的角色卡")
+            return
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        self.page.pop_dialog()
+        confirm = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("删除角色卡"),
+            content=ft.Text(f"将删除「{card['name']}」及其全部聊天记录，确定？"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="删除",
+                    on_click=lambda e: self._do_delete_role_card(card_id),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(confirm)
+
+    def _do_delete_role_card(self, card_id):
+        self.page.pop_dialog()
+        for sess in self.db.list_ai_sessions():
+            if sess.get("role_card_id") == card_id:
+                self.db.delete_ai_session(sess["id"])
+        self.db.delete_role_card(card_id)
+        self._toast("角色卡已删除")
+        self._choose_roleplay()
+
+    def _begin_roleplay(self, card_id, dlg=None):
+        if dlg is not None:
+            self.page.pop_dialog()
+        if not card_id:
+            self._toast("请先选择或导入角色卡")
+            return
+        card = self.db.get_role_card(card_id)
+        if not card:
+            self._toast("角色卡不存在")
+            return
+        # 每个角色一个永久聊天框：直接继续已有 roleplay 会话
+        existing = None
+        for sess in self.db.list_ai_sessions():
+            if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card_id:
+                existing = sess
+                break
+        if existing:
+            sid = existing["id"]
+        else:
+            sid = self.db.create_ai_session(
+                "roleplay", f"角色扮演 · {card['name']}", role_card_id=card_id
+            )
+        self._ai_session_id = sid
+        self._ai_center = False
+        self._render()
+
+    async def _import_role_card(self, dlg=None):
+        if dlg is not None:
+            self.page.pop_dialog()
+        try:
+            files = await self.file_picker.pick_files(
+                dialog_title="选择角色卡",
+                allowed_extensions=["txt", "json"],
+            )
+        except Exception as ex:
+            self._toast(f"选择失败：{ex}")
+            return
+        if not files:
+            self._toast("已取消")
+            return
+        fp = files[0]
+        try:
+            text = None
+            b = getattr(fp, "bytes", None)
+            if b:
+                text = b.decode("utf-8", "replace")
+            elif getattr(fp, "path", None):
+                with open(fp.path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            if not text:
+                raise ValueError("文件为空")
+            raw_name = getattr(fp, "name", None)
+            if not raw_name and getattr(fp, "path", None):
+                raw_name = os.path.basename(fp.path)
+            name = raw_name or "角色卡"
+            content = text
+            try:
+                import json as _json
+                data = _json.loads(text)
+                if isinstance(data, dict):
+                    name = str(data.get("name") or data.get("角色名") or name)
+                    content = str(
+                        data.get("content") or data.get("system") or data.get("设定")
+                        or text
+                    )
+            except Exception:
+                pass
+            self.db.create_role_card(name, content)
+            self._toast(f"已导入角色卡：{name}")
+            self._choose_roleplay()
+        except Exception as ex:
+            self._toast(f"导入失败：{ex}")
+
     def _start_ai_session(self, skill_id, project_id=None):
         skill = SKILL_BY_ID.get(skill_id)
         if not skill:
@@ -460,6 +621,80 @@ class TaskApp:
         sess = self.db.get_ai_session(self._ai_session_id) if self._ai_session_id else None
         return sess["title"] if sess else "AI 对话"
 
+    def _role_state_card(self, card_id, session_id):
+        state = self.db.role_card_state(card_id)
+        affection = state.get("好感度", "未建立")
+        emotion = state.get("当前情绪", "平静")
+        memory = state.get("记忆", "")
+        important = state.get("重要记忆", "")
+        lines = [
+            ft.Row(
+                [
+                    ft.Text("好感度", size=11, color=ft.Colors.BLUE_GREY_500),
+                    ft.Text(str(affection), size=13, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_700),
+                    ft.Container(width=8),
+                    ft.Text("情绪", size=11, color=ft.Colors.BLUE_GREY_500),
+                    ft.Text(str(emotion), size=13, color=ft.Colors.BLUE_GREY_700),
+                    ft.Container(expand=True),
+                    ft.TextButton("重置关系", on_click=lambda e: self._reset_role_relation(card_id)),
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        ]
+        if memory:
+            lines.append(ft.Text(f"记忆：{memory}", size=12,
+                                 color=ft.Colors.BLUE_GREY_600,
+                                 max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        if important:
+            lines.append(ft.Text(f"重要：{important}", size=12,
+                                 color=ft.Colors.BLUE_700,
+                                 max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        return ft.Container(
+            margin=ft.Margin(left=12, right=12, top=8, bottom=4),
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
+            bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.LIGHT_BLUE_200),
+            border_radius=10,
+            content=ft.Column(lines, tight=True, spacing=4),
+        )
+
+    def _reset_role_relation(self, card_id):
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("重置关系"),
+            content=ft.Text(
+                f"将清空「{card['name']}」的对话历史、记忆、情绪和好感度，"
+                "角色卡本身保留。确定？"
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="确认重置",
+                    on_click=lambda e: self._do_reset_role_relation(card_id),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _do_reset_role_relation(self, card_id):
+        self.page.pop_dialog()
+        # 删除该角色所有 roleplay 会话，重置动态状态
+        for sess in self.db.list_ai_sessions():
+            if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card_id:
+                self.db.delete_ai_session(sess["id"])
+        self.db.save_role_card_state(card_id, {})
+        if self._ai_session_id is not None:
+            self._ai_session_id = None
+        self._ai_input = None
+        self._ai_center = True
+        self._render()
+        self._toast("关系已重置，角色卡保留")
+
     def _render_ai_chat(self):
         sess = self.db.get_ai_session(self._ai_session_id) if self._ai_session_id else None
         if not sess:
@@ -469,8 +704,18 @@ class TaskApp:
         messages = self.db.get_ai_messages(sess["id"])
 
         rows = []
+        role_label = None
+        if skill and skill["id"] == "roleplay" and sess.get("role_card_id"):
+            rows.append(self._role_state_card(sess["role_card_id"], sess["id"]))
+            card = self.db.get_role_card(sess["role_card_id"])
+            role_label = card["name"] if card else "角色"
         for i, msg in enumerate(messages):
-            rows.append(self._ai_message_row(msg, is_last=(i == len(messages) - 1), kind=kind))
+            rows.append(self._ai_message_row(
+                msg,
+                is_last=(i == len(messages) - 1),
+                kind=kind,
+                role_label=role_label,
+            ))
 
         if kind == "decompose":
             last_assistant = next(
@@ -519,7 +764,7 @@ class TaskApp:
         ))
         return rows
 
-    def _ai_message_row(self, msg, is_last=False, kind="chat"):
+    def _ai_message_row(self, msg, is_last=False, kind="chat", role_label=None):
         role = msg["role"]
         content = msg["content"]
         is_user = role == "user"
@@ -545,7 +790,7 @@ class TaskApp:
             )
         bubble_parts = [
             ft.Text(
-                "你" if is_user else "AI",
+                "你" if is_user else (role_label or "AI"),
                 size=11, color=ft.Colors.BLUE_GREY_500,
                 weight=ft.FontWeight.BOLD,
             ),
@@ -580,28 +825,72 @@ class TaskApp:
         sess = self.db.get_ai_session(self._ai_session_id)
         if not sess:
             return
-        skill = SKILL_BY_ID.get(sess["skill_id"])
-        system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
-        history = self.db.get_ai_messages(sess["id"], limit=200)
-        if not history:
-            return
-        payload = [{"role": "system", "content": system}]
-        payload.extend({"role": m["role"], "content": m["content"]} for m in history)
-        cfg = self.db.get_ai_config()
         self._ai_busy = True
         self._render()
         try:
-            reply = await asyncio.to_thread(
-                chat_completion,
-                cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
-                payload,
-            )
-            self.db.append_ai_message(sess["id"], "assistant", reply)
+            reply = await self._chat_with_role_card(sess)
+            if reply is None:
+                return
+            clean, state = parse_state_block(reply)
+            if sess.get("role_card_id") and state:
+                self._merge_role_state(sess["role_card_id"], state)
+            if clean:
+                self.db.append_ai_message(sess["id"], "assistant", clean)
         except Exception as ex:
             self._toast(f"AI 错误：{ex}")
         finally:
             self._ai_busy = False
             self._render()
+
+    async def _chat_with_role_card(self, sess):
+        """带角色卡按需加载的 AI 请求；AI 请求 @load 时自动注入后重试。"""
+        skill = SKILL_BY_ID.get(sess["skill_id"])
+        cfg = self.db.get_ai_config()
+        card = None
+        if sess.get("role_card_id"):
+            card = self.db.get_role_card(sess["role_card_id"])
+        loaded = set(self._role_loaded_sections.get(sess["id"], set()))
+
+        for _ in range(3):
+            if card:
+                state = self.db.role_card_state(card["id"])
+                system = build_role_system(card["content"], state, loaded)
+            else:
+                system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
+            history = self.db.get_ai_messages(sess["id"], limit=200)
+            if not history:
+                return None
+            if history and history[-1]["role"] == "user":
+                last_text = history[-1]["content"]
+                if any(k in last_text for k in
+                       ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+                    system += (
+                        "\n\n注意：用户本轮明确要求你记住某些内容。"
+                        "请把它逐字保留到 ---STATE--- 的 重要记忆= 字段，不要压缩丢失。"
+                    )
+            payload = [{"role": "system", "content": system}]
+            payload.extend(
+                {"role": m["role"], "content": m["content"]} for m in history
+            )
+            reply = await asyncio.to_thread(
+                chat_completion,
+                cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+                payload,
+            )
+            clean, loads = extract_load_requests(reply)
+            if not loads:
+                return reply
+            loaded.update(loads)
+            self._role_loaded_sections[sess["id"]] = loaded
+            # 不把 @load 请求存为回复，继续重试
+        return clean
+
+    def _merge_role_state(self, card_id, state):
+        old = self.db.role_card_state(card_id)
+        for key, value in state.items():
+            if value:
+                old[key] = value
+        self.db.save_role_card_state(card_id, old)
 
     def _copy_text(self, text):
         self.page.run_task(self._do_copy_text, text)
@@ -1297,17 +1586,35 @@ class TaskApp:
         return ft.Dismissible(
             content=tile,
             dismiss_direction=ft.DismissDirection.HORIZONTAL,
+            dismiss_thresholds={
+                ft.DismissDirection.END_TO_START: 0.85,
+                ft.DismissDirection.START_TO_END: 0.85,
+            },
             background=ft.Container(
-                alignment=ft.Alignment(-0.9, 0),
+                alignment=ft.Alignment(0, 0),
                 bgcolor=ft.Colors.TEAL,
                 padding=ft.Padding(left=20, right=20, top=0, bottom=0),
-                content=ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.WHITE),
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.WHITE),
+                        ft.Text("继续滑动完成", color=ft.Colors.WHITE,
+                                weight=ft.FontWeight.BOLD),
+                    ],
+                    spacing=6,
+                ),
             ),
             secondary_background=ft.Container(
-                alignment=ft.Alignment(0.9, 0),
+                alignment=ft.Alignment(0, 0),
                 bgcolor=ft.Colors.RED_600,
                 padding=ft.Padding(left=20, right=20, top=0, bottom=0),
-                content=ft.Icon(ft.Icons.DELETE, color=ft.Colors.WHITE),
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.DELETE, color=ft.Colors.WHITE),
+                        ft.Text("继续滑动删除", color=ft.Colors.WHITE,
+                                weight=ft.FontWeight.BOLD),
+                    ],
+                    spacing=6,
+                ),
             ),
             on_dismiss=lambda e, i=item_id, d=done: self._on_dismiss(e, i, d),
         )
@@ -1524,7 +1831,15 @@ class TaskApp:
             self._render()
 
     def _on_key(self, e):
-        if getattr(e, "key", "") in ("Escape", "Backspace") and not getattr(e, "ctrl", False):
+        key = getattr(e, "key", "")
+        if getattr(e, "ctrl", False):
+            return
+        # 在 AI 对话/搜索输入框里，Delete/Backspace 是删字符，不应触发页面返回
+        if key in ("Backspace", "Delete") and (
+            self._ai_session_id is not None or self._search_mode
+        ):
+            return
+        if key in ("Escape", "Backspace"):
             self._back()
 
     def _on_add(self, e):
@@ -2202,12 +2517,17 @@ class TaskApp:
 
     # ================= 工具 =================
     def _toast(self, msg, action_label=None, on_undo=None):
+        action = None
+        if action_label and on_undo:
+            action = ft.SnackBarAction(
+                label=action_label,
+                on_click=lambda e: (on_undo() if on_undo else None),
+            )
         sb = ft.SnackBar(
             content=ft.Text(msg),
             behavior=ft.SnackBarBehavior.FLOATING,
             duration=3000,
-            action=action_label,
-            on_action=lambda e: (on_undo() if on_undo else None),
+            action=action,
         )
         self.page.show_dialog(sb)
 

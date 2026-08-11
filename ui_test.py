@@ -472,6 +472,52 @@ def main():
     assert restored is not None
     assert db.stats_overview()["week_done"] == w0 + 1  # 完成日志随恢复带回来
 
+    # ---- 角色卡解析工具 ----
+    card_text = """[核心]
+名字：阿晴
+[背景]
+住在海边
+[说话风格]
+短句
+"""
+    sections = ai_client.parse_role_card(card_text)
+    assert sections["核心"] == "名字：阿晴"
+    assert sections["背景"] == "住在海边"
+
+    clean, state = ai_client.parse_state_block(
+        "好的。\n---STATE---\n好感度=45\n当前情绪=开心"
+    )
+    assert clean == "好的。"
+    assert state["好感度"] == "45"
+    assert state["当前情绪"] == "开心"
+
+    clean2, loads = ai_client.extract_load_requests("先回答\n@load:背景\n继续")
+    assert loads == ["背景"]
+    assert "@load" not in clean2
+
+    system = ai_client.build_role_system(
+        card_text, {"好感度": "45", "记忆": "今天聊了海"}
+    )
+    assert "名字：阿晴" in system
+    assert "摘要" in system
+    assert "@load:背景" in system
+    assert "45" in system
+
+    # ---- 角色卡 DB 状态 + 每个角色一个永久聊天框 + 重置关系 ----
+    card_id = db.create_role_card("测试角色", card_text)
+    db.save_role_card_state(card_id, {"好感度": "45", "记忆": "x"})
+    assert db.role_card_state(card_id)["好感度"] == "45"
+
+    app._begin_roleplay(card_id)
+    sid1 = app._ai_session_id
+    assert sid1 is not None
+    app._begin_roleplay(card_id)
+    assert app._ai_session_id == sid1  # 复用同一长期聊天框
+
+    app._do_reset_role_relation(card_id)
+    assert db.role_card_state(card_id) == {}
+    assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
+
     print("UI TEST OK")
 
 

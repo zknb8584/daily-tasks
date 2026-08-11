@@ -56,6 +56,30 @@ AI_SKILLS = [
             "必要时分点、给例子、给出可执行的建议。不要编造事实。"
         ),
     },
+    {
+        "id": "study_help",
+        "name": "课堂速解",
+        "kind": "chat",
+        "description": "上课遇到没听过的词或概念，快速讲清楚",
+        "system": (
+            "你是一个耐心的课堂助教。用户在上课时遇到没听过的词、概念或术语。"
+            "先用一两句大白话直接回答它是什么意思，再给一个贴近生活的例子，"
+            "最后给出一个容易记住的记忆方法或一句话总结。"
+            "如果用户追问，继续用更具体的例子解释，不要绕弯子。"
+        ),
+    },
+    {
+        "id": "roleplay",
+        "name": "角色扮演",
+        "kind": "chat",
+        "description": "导入角色卡，建立长期陪伴对话",
+        "system": (
+            "你是用户导入的角色。严格按角色卡设定扮演，保持人设、语气和关系。"
+            "如果用户提到之前聊过的事，要自然记得并接上（历史对话会提供给你）。"
+            "回复要像真实对话，有情绪、有回应，不要机械化列点。"
+            "不要主动跳出角色，除非用户明确要求。"
+        ),
+    },
 ]
 
 SKILL_BY_ID = {s["id"]: s for s in AI_SKILLS}
@@ -146,3 +170,116 @@ def extract_tasks(text: str):
         normalized.append((lvl, title))
         prev = lvl
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# 角色卡解析 / 动态状态 / 按需加载
+# ---------------------------------------------------------------------------
+ROLE_SECTIONS = ["核心", "背景", "说话风格", "关系", "扩展",
+                 "记忆", "当前情绪", "好感度"]
+
+
+def parse_role_card(content: str) -> dict:
+    """按 [段名] 解析角色卡，返回 {段名: 内容}。未知段名保留。"""
+    sections = {}
+    current = None
+    for raw in content.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]") and len(line) > 2:
+            current = line[1:-1].strip()
+            sections[current] = []
+            continue
+        if current:
+            sections[current].append(raw)
+    return {k: "\n".join(v).strip() for k, v in sections.items() if v}
+
+
+def parse_state_block(text: str):
+    """把 ---STATE--- 状态块从回复中拆出来。
+
+    返回 (clean_text, state_dict)。找不到状态块时 state_dict 为空。
+    """
+    marker = "---STATE---"
+    idx = text.find(marker)
+    if idx == -1:
+        return text, {}
+    body = text[idx + len(marker):].strip()
+    state = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if key:
+            state[key] = val
+    clean = text[:idx].rstrip()
+    return clean, state
+
+
+def extract_load_requests(text: str):
+    """找出 AI 请求加载的角色卡段，并从回复文本中移除 @load 指令。"""
+    lines = []
+    loads = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("@load:") or stripped.startswith("@load："):
+            loads.append(stripped.split(":", 1)[1].strip())
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip(), loads
+
+
+def build_role_system(card_content: str, state: dict, loaded=None) -> str:
+    """生成角色扮演 system：
+    - 始终带 [核心] 和动态状态
+    - 其他静态段只给一句话摘要，需要时 AI 用 @load:段名 请求全文
+    - 已加载段直接带全文
+    """
+    sections = parse_role_card(card_content)
+    loaded = set(loaded or [])
+    core = sections.get("核心", "")
+    memory = state.get("记忆", "")
+    emotion = state.get("当前情绪", "")
+    affection = state.get("好感度", "")
+    important = state.get("重要记忆", "")
+
+    parts = [
+        SKILL_BY_ID["roleplay"]["system"],
+        "以下是角色卡信息：",
+    ]
+    if core:
+        parts.append(f"[核心]\n{core}")
+    if affection:
+        parts.append(f"[好感度]\n{affection}")
+    if emotion:
+        parts.append(f"[当前情绪]\n{emotion}")
+    if important:
+        parts.append(f"[重要记忆]\n{important}")
+    if memory:
+        parts.append(f"[记忆摘要]\n{memory}")
+
+    # 其他静态段：未加载时给摘要，已加载时给全文
+    for section in ("背景", "说话风格", "关系", "扩展"):
+        content = sections.get(section, "")
+        if not content:
+            continue
+        if section in loaded:
+            parts.append(f"[{section}] 全文：\n{content}")
+        else:
+            summary = content.splitlines()[0][:100] if content else ""
+            parts.append(
+                f"[{section}] 摘要：{summary}\n"
+                f"如果你需要完整 {section} 细节，请输出一行 @load:{section}"
+            )
+
+    parts.append(
+        "规则：\n"
+        "- 保持角色人设，用口语化、短句、有情绪的回复，不要出现“作为AI/很高兴帮助你”等套话。\n"
+        "- 如果用户说“一定要记得/记住/别忘了/很重要”，请把它写入状态块。\n"
+        "- 如果回答需要某个段的完整细节，只输出 @load:段名，不要编造细节。\n"
+        "- 回复末尾可以输出 ---STATE--- 状态块（格式：键=值，每行一个），"
+        "用于更新 好感度/当前情绪/记忆/重要记忆；不需要更新时可不输出。"
+    )
+    return "\n\n".join(parts)
