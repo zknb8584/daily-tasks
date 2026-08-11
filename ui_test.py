@@ -518,6 +518,17 @@ def main():
     assert db.role_card_state(card_id) == {}
     assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
 
+    # ---- AI 生成角色卡 ----
+    gen_field = ft.TextField(value="一个叫小星的机器人")
+    gen_status = ft.Text("")
+    orig_chat = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: (
+        "[核心]\n名字：小星\n人设：机器人\n[说话风格]\n简短"
+    )
+    asyncio.run(app._do_generate_role_card(gen_field, gen_status, None))
+    appmod.chat_completion = orig_chat
+    assert any(c["name"] == "小星" for c in db.list_role_cards())
+
     print("UI TEST OK")
 
 

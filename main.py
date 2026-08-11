@@ -447,7 +447,14 @@ class TaskApp:
             size=12, color=ft.Colors.BLUE_GREY_600,
         ) if not cards else ft.Text("", size=12)
         actions = [
-            ft.TextButton("导入角色卡", on_click=lambda e: self._import_role_card(dlg)),
+            ft.TextButton(
+                "导入角色卡",
+                on_click=lambda e: self.page.run_task(self._import_role_card, dlg),
+            ),
+            ft.TextButton(
+                "AI 生成角色卡",
+                on_click=lambda e: self._open_role_card_generator(dlg),
+            ),
             ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
             ft.FilledButton(
                 content="开始对话",
@@ -475,6 +482,82 @@ class TaskApp:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(dlg)
+
+    def _open_role_card_generator(self, dlg):
+        if dlg is not None:
+            self.page.pop_dialog()
+        desc = ft.TextField(
+            label="描述你想要的角色",
+            hint_text="例如：一个叫阿晴的温柔女生，住在海边，说话很短，有点傲娇",
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+        )
+        status = ft.Text("", size=12, color=ft.Colors.BLUE_GREY_600)
+        gen_dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("AI 生成角色卡"),
+            content=ft.Column([desc, status], tight=True, spacing=10),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="生成角色卡",
+                    on_click=lambda e: self.page.run_task(
+                        self._do_generate_role_card, desc, status, gen_dlg
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(gen_dlg)
+
+    async def _do_generate_role_card(self, desc_field, status, gen_dlg=None):
+        desc = (desc_field.value or "").strip()
+        if not desc:
+            status.value = "请先描述你想要的角色"
+            self.page.update()
+            return
+        cfg = self.db.get_ai_config()
+        if not cfg.get("ai_api_key"):
+            status.value = "请先在「设置 → AI 设置」填写 API Key"
+            self.page.update()
+            return
+        status.value = "正在生成角色卡…"
+        self.page.update()
+        try:
+            system = (
+                "你是一个角色卡创作者。根据用户的一句话描述，生成一份固定格式的角色卡文本，"
+                "只使用这些段名：[核心] [背景] [说话风格] [关系] [扩展]。"
+                "[核心] 第一行写“名字：xxx”，第二行写一句话人设。"
+                "内容要具体、有记忆点，语气符合角色设定，不要出现“作为AI”之类的话，"
+                "不要输出 Markdown 代码块，也不要输出多余解释。"
+            )
+            reply = await asyncio.to_thread(
+                chat_completion,
+                cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": desc},
+                ],
+            )
+            content = reply.strip()
+            if content.startswith("```"):
+                content = content.strip("`")
+                content = content.split("\n", 1)[-1].strip()
+            sections = parse_role_card(content)
+            if not sections.get("核心"):
+                raise ValueError("AI 生成的格式不完整")
+            first_line = sections["核心"].splitlines()[0].strip()
+            name = first_line.split("：", 1)[-1].strip() if "：" in first_line else desc[:20]
+            name = name or "AI 角色"
+            self.db.create_role_card(name, content)
+            self._toast(f"已生成角色卡：{name}")
+            if gen_dlg is not None:
+                self.page.pop_dialog()
+            self._choose_roleplay()
+        except Exception as ex:
+            status.value = f"生成失败：{ex}"
+            self.page.update()
 
     def _delete_selected_role_card(self, dropdown, dlg):
         card_id = dropdown.value if dropdown is not None else None
