@@ -40,6 +40,7 @@ from ai_client import (
     extract_tasks,
     parse_role_card,
     parse_state_block,
+    tavern_to_role_card,
 )
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
@@ -652,11 +653,25 @@ class TaskApp:
                 import json as _json
                 data = _json.loads(text)
                 if isinstance(data, dict):
-                    name = str(data.get("name") or data.get("角色名") or name)
-                    content = str(
-                        data.get("content") or data.get("system") or data.get("设定")
-                        or text
-                    )
+                    card_data = data.get("data") if (
+                        data.get("spec") == "chara_card_v2"
+                        and isinstance(data.get("data"), dict)
+                    ) else data
+                    if any(k in card_data for k in
+                           ("description", "personality", "scenario",
+                            "first_mes", "mes_example", "人设", "性格")):
+                        content = tavern_to_role_card(card_data)
+                        name = str(
+                            card_data.get("name") or card_data.get("角色名") or name
+                        )
+                    else:
+                        name = str(
+                            card_data.get("name") or card_data.get("角色名") or name
+                        )
+                        content = str(
+                            card_data.get("content") or card_data.get("system")
+                            or card_data.get("设定") or text
+                        )
             except Exception:
                 pass
             self.db.create_role_card(name, content)

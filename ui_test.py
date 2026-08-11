@@ -549,6 +549,30 @@ def main():
     assert db.get(c2a)["done"] == 0
     assert db.get(c2b)["done"] == 1
 
+    # ---- 角色卡 JSON 兼容转换 + 角色化输出规则 ----
+    tavern = ai_client.tavern_to_role_card({
+        "name": "娜娜",
+        "description": "猫耳少女",
+        "personality": "说话简短，喜欢用喵",
+        "scenario": "住在一间旧书店",
+    })
+    parsed = ai_client.parse_role_card(tavern)
+    assert parsed["核心"].startswith("名字：娜娜")
+    assert "喵" in parsed["说话风格"]
+    assert "旧书店" in parsed["背景"]
+
+    card_v2 = ai_client.tavern_to_role_card({
+        "spec": "chara_card_v2",
+        "data": {"name": "V2角色", "description": "测试"},
+    })
+    assert "V2角色" in card_v2
+
+    role_system = ai_client.build_role_system(
+        "[核心]\n名字：测试角色", {}
+    )
+    assert "像真人一样说话" in role_system
+    assert "AI 腔" in role_system
+
     print("UI TEST OK")
 
 
