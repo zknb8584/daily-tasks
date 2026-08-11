@@ -518,6 +518,54 @@ def main():
     assert db.role_card_state(card_id) == {}
     assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
 
+    # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
+    v2_file = os.path.join(tmp, "v2_role.json")
+    with open(v2_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "spec": "chara_card_v2",
+            "data": {
+                "name": "V2导入",
+                "description": "测试导入",
+                "system_prompt": "你是旧书店老板。",
+                "post_history_instructions": "回复前先想动作。",
+                "character_book": {"entries": [{
+                    "keys": ["暗门"],
+                    "content": "书店角落里有一扇暗门。",
+                }]},
+            },
+        }, f, ensure_ascii=False)
+    app.file_picker = FakePicker(files=[types.SimpleNamespace(path=v2_file, bytes=None)])
+    asyncio.run(app._import_role_card(None))
+    imported = [c for c in db.list_role_cards() if c["name"] == "V2导入"]
+    assert len(imported) == 1
+    assert "旧书店老板" in imported[0]["content"]
+    assert "回复前先想动作" in imported[0]["content"]
+    assert "暗门" in imported[0]["content"]
+
+    # ---- 角色扮演实际请求：V2 指令 + 世界书关键词自动加载 ----
+    wb_card = "[核心]\n名字：世界书测试\n[系统提示]\n只按旧书店规则回复\n"
+    wb_card += "[历史后置指令]\n回复前先想角色动作。\n"
+    wb_card += "[世界书]\n条目：暗门\n关键词：旧书店，雨夜\n内容：角落里有扇暗门。\n"
+    wb_card_id = db.create_role_card("世界书测试", wb_card)
+    wb_sid = db.create_ai_session(
+        "roleplay", "世界书测试会话", role_card_id=wb_card_id
+    )
+    db.append_ai_message(wb_sid, "user", "我在旧书店门口。")
+    captured_payloads = []
+    orig_chat_completion = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: (
+        captured_payloads.append(a[3]) or "好的。"
+    )
+    app._role_loaded_sections[wb_sid] = set()
+    asyncio.run(app._chat_with_role_card(db.get_ai_session(wb_sid)))
+    appmod.chat_completion = orig_chat_completion
+    assert captured_payloads, "应该已经调用 chat_completion"
+    payload = captured_payloads[0]
+    assert "只按旧书店规则回复" in payload[0]["content"]
+    assert "角落里有扇暗门" in payload[0]["content"]
+    assert payload[-1]["role"] == "system"
+    assert payload[-1]["content"].startswith("[历史后置指令]")
+
     # ---- AI 生成角色卡 ----
     gen_field = ft.TextField(value="一个叫小星的机器人")
     gen_status = ft.Text("")
@@ -563,15 +611,44 @@ def main():
 
     card_v2 = ai_client.tavern_to_role_card({
         "spec": "chara_card_v2",
-        "data": {"name": "V2角色", "description": "测试"},
+        "data": {
+            "name": "V2角色",
+            "description": "测试",
+            "system_prompt": "你是旧书店老板，绝不主动提起未来。",
+            "post_history_instructions": "回复前先想角色当下的动作。",
+            "character_book": {
+                "entries": [
+                    {
+                        "keys": ["旧书店", "雨夜"],
+                        "content": "书店角落里有一扇暗门。",
+                    }
+                ]
+            },
+        },
     })
     assert "V2角色" in card_v2
+    assert "旧书店老板" in card_v2
+    assert "回复前先想角色当下的动作" in card_v2
+    assert "暗门" in card_v2
+    world_entries = ai_client.parse_world_book(card_v2)
+    assert world_entries[0]["keys"] == ["旧书店", "雨夜"]
+    assert ai_client.match_world_book(card_v2, "你记得那间旧书店吗？") == ["世界书"]
+    assert ai_client.post_history_instructions(card_v2) == "回复前先想角色当下的动作。"
 
     role_system = ai_client.build_role_system(
         "[核心]\n名字：测试角色", {}
     )
     assert "像真人一样说话" in role_system
     assert "AI 腔" in role_system
+    assert "万能安慰" in role_system
+    assert "具体的行动、反应或新情境" in role_system
+
+    role_system_v2 = ai_client.build_role_system(card_v2, {})
+    assert "优先级最高" in role_system_v2
+    assert "旧书店老板" in role_system_v2
+    assert "世界书" in role_system_v2
+    role_system_v2_loaded = ai_client.build_role_system(card_v2, {}, loaded={"世界书"})
+    assert "暗门" in role_system_v2_loaded
 
     print("UI TEST OK")
 

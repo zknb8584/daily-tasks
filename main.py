@@ -38,15 +38,17 @@ from ai_client import (
     chat_completion,
     extract_load_requests,
     extract_tasks,
+    match_world_book,
     parse_role_card,
     parse_state_block,
+    post_history_instructions,
     tavern_to_role_card,
 )
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.1.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.1.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -659,7 +661,9 @@ class TaskApp:
                     ) else data
                     if any(k in card_data for k in
                            ("description", "personality", "scenario",
-                            "first_mes", "mes_example", "人设", "性格")):
+                            "first_mes", "mes_example", "人设", "性格",
+                            "system_prompt", "post_history_instructions",
+                            "character_book")):
                         content = tavern_to_role_card(card_data)
                         name = str(
                             card_data.get("name") or card_data.get("角色名") or name
@@ -950,14 +954,19 @@ class TaskApp:
         loaded = set(self._role_loaded_sections.get(sess["id"], set()))
 
         for _ in range(3):
-            if card:
-                state = self.db.role_card_state(card["id"])
-                system = build_role_system(card["content"], state, loaded)
-            else:
-                system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
             history = self.db.get_ai_messages(sess["id"], limit=200)
             if not history:
                 return None
+            if card:
+                state = self.db.role_card_state(card["id"])
+                if history and history[-1]["role"] == "user":
+                    loaded.update(
+                        match_world_book(card["content"], history[-1]["content"])
+                    )
+                    self._role_loaded_sections[sess["id"]] = loaded
+                system = build_role_system(card["content"], state, loaded)
+            else:
+                system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
             if history and history[-1]["role"] == "user":
                 last_text = history[-1]["content"]
                 if any(k in last_text for k in
@@ -970,6 +979,11 @@ class TaskApp:
             payload.extend(
                 {"role": m["role"], "content": m["content"]} for m in history
             )
+            post = post_history_instructions(card["content"]) if card else ""
+            if post:
+                payload.append(
+                    {"role": "system", "content": f"[历史后置指令]\n{post}"}
+                )
             reply = await asyncio.to_thread(
                 chat_completion,
                 cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
