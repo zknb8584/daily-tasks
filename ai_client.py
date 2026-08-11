@@ -48,6 +48,24 @@ AI_SKILLS = [
         ),
     },
     {
+        "id": "role_grill",
+        "name": "Grill-me 拷问角色卡",
+        "kind": "role_grill",
+        "description": "像 grill-me 一样逐题追问，把角色磨具体后生成角色卡",
+        "system": (
+            "你是一个耐心、尖锐的角色卡拷问者，像 grill-me 一样一次只问一个问题。"
+            "用户会先给出角色名和基础世界观/设定。你要逐项追问，并把每一个薄弱处追问到具体："
+            "核心人设、背景、性格、说话风格、爱好、关系、弱点、习惯、记忆点、"
+            "开场白、示例对话、当前情绪/好感度基线、剧情触发点。"
+            "每次最多问一个问题；如果用户回答太笼统，继续追问，宁可多问几轮，也不要提前生成。"
+            "当信息足够时，先简短总结，然后输出角色卡，以 ---ROLE_CARD--- 单独一行开始。"
+            "角色卡格式如下：\n"
+            "[核心]\n名字：xxx\n人设：一句话\n"
+            "[背景]\n[爱好]\n[说话风格]\n[关系]\n[开场白]\n[示例对话]\n[作者备注]\n[扩展]\n"
+            "内容要具体、有记忆点，不要输出 Markdown 代码块，也不要输出多余解释。"
+        ),
+    },
+    {
         "id": "general_chat",
         "name": "通用问答",
         "kind": "chat",
@@ -171,6 +189,17 @@ def extract_tasks(text: str):
         normalized.append((lvl, title))
         prev = lvl
     return normalized
+
+
+def extract_role_card(text: str) -> str:
+    """提取 ---ROLE_CARD--- 之后的角色卡文本。"""
+    marker = re.search(r"^\s*---ROLE_CARD---\s*$", text or "", flags=re.MULTILINE)
+    if not marker:
+        return ""
+    body = text[marker.end():].strip()
+    if body.startswith("```"):
+        body = body.strip("`").strip()
+    return body
 
 
 # ---------------------------------------------------------------------------

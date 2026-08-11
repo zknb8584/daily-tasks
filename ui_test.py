@@ -739,6 +739,21 @@ def main():
     app._begin_roleplay(greet_card_id)
     assert len(db.get_ai_messages(greet_sid)) == 1
 
+    # ---- Grill-me 拷问角色卡：技能、提取、落库 ----
+    assert any(s["id"] == "role_grill" for s in ai_client.AI_SKILLS)
+    app._start_role_grill(None)
+    assert db.get_ai_session(app._ai_session_id)["skill_id"] == "role_grill"
+    grilled_card = (
+        "总结：角色已经很具体。\n"
+        "---ROLE_CARD---\n"
+        "[核心]\n名字：拷问角色\n人设：一位旧书店的守夜人\n"
+        "[说话风格]\n简短、克制\n[开场白]\n你来早了，书还没醒。\n"
+    )
+    extracted = ai_client.extract_role_card(grilled_card)
+    assert "名字：拷问角色" in extracted
+    app._create_role_from_ai(extracted)
+    assert any(c["name"] == "拷问角色" for c in db.list_role_cards())
+
     print("UI TEST OK")
 
 

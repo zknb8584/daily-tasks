@@ -39,6 +39,7 @@ from ai_client import (
     chat_completion,
     extract_bracket_directives,
     extract_load_requests,
+    extract_role_card,
     extract_tasks,
     format_group_history,
     has_remember_directive,
@@ -54,7 +55,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.3.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.3.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -819,6 +820,10 @@ class TaskApp:
                 "AI 生成角色卡",
                 on_click=lambda e: self._open_role_card_generator(dlg),
             ),
+            ft.TextButton(
+                "Grill-me 拷问生成",
+                on_click=lambda e: self._start_role_grill(dlg),
+            ),
             ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
             ft.FilledButton(
                 content="开始对话",
@@ -878,6 +883,11 @@ class TaskApp:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(gen_dlg)
+
+    def _start_role_grill(self, dlg=None):
+        if dlg is not None:
+            self.page.pop_dialog()
+        self._start_ai_session("role_grill")
 
     async def _do_generate_role_card(self, desc_field, status, gen_dlg=None):
         desc = (desc_field.value or "").strip()
@@ -1301,6 +1311,20 @@ class TaskApp:
                     ),
                 ))
 
+        if kind == "role_grill":
+            last_assistant = next(
+                (m for m in reversed(messages) if m["role"] == "assistant"), None
+            )
+            if last_assistant and extract_role_card(last_assistant["content"]):
+                rows.append(ft.Container(
+                    padding=ft.Padding(left=12, right=12, top=8, bottom=4),
+                    content=ft.FilledButton(
+                        content="预览并生成角色卡",
+                        icon=ft.Icons.PERSON_ADD,
+                        on_click=lambda e, s=sess["id"]: self._preview_ai_role_card(s),
+                    ),
+                ))
+
         if self._ai_input is None:
             self._ai_input = ft.TextField(
                 hint_text="回复 AI，或输入新问题",
@@ -1509,6 +1533,62 @@ class TaskApp:
             self._toast("已追加到项目备注")
             return
         self._toast("请从项目菜单进入 AI 会话，才能保存备注")
+
+    # ---------- AI 角色卡落库 ----------
+    def _preview_ai_role_card(self, session_id):
+        sess = self.db.get_ai_session(session_id)
+        if not sess or sess["skill_id"] != "role_grill":
+            return
+        last = self.db.get_ai_messages(session_id)
+        assistant = [m for m in last if m["role"] == "assistant"]
+        if not assistant:
+            self._toast("AI 还没有生成角色卡")
+            return
+        content = extract_role_card(assistant[-1]["content"])
+        if not content or not parse_role_card(content).get("核心"):
+            self._toast("AI 回复里没有可生成的角色卡")
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("确认生成角色卡"),
+            content=ft.Column(
+                [
+                    ft.Text("检查角色卡内容，确认后加入角色卡列表：", size=12,
+                            color=ft.Colors.BLUE_GREY_600),
+                    ft.Text(content, size=12, selectable=True),
+                ],
+                tight=True,
+                spacing=8,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="创建角色卡",
+                    on_click=lambda e: self._create_role_from_ai(content),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _create_role_from_ai(self, content):
+        sections = parse_role_card(content)
+        core = sections.get("核心", "")
+        if not core:
+            self._toast("角色卡格式不完整")
+            return
+        first_line = core.splitlines()[0].strip()
+        name = first_line.split("：", 1)[-1].strip() if "：" in first_line else ""
+        name = name or "AI 角色"
+        self.page.pop_dialog()
+        self.db.create_role_card(name, content)
+        self._ai_session_id = None
+        self._ai_input = None
+        self._ai_center = True
+        self._toast(f"已生成角色卡：{name}")
+        self._render()
+        self._choose_roleplay()
 
     # ---------- AI 任务树落库 ----------
     def _preview_ai_tasks(self, session_id):
