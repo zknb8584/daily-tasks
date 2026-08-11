@@ -34,21 +34,24 @@ import flet as ft
 from ai_client import (
     AI_SKILLS,
     SKILL_BY_ID,
+    build_group_role_system,
     build_role_system,
     chat_completion,
     extract_load_requests,
     extract_tasks,
+    format_group_history,
     match_world_book,
     parse_role_card,
     parse_state_block,
     post_history_instructions,
+    select_group_speakers,
     tavern_to_role_card,
 )
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.1.2"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.2.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -161,6 +164,10 @@ class TaskApp:
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
+        self._ai_group_id = None        # 当前打开的群聊 id
+        self._group_input = None        # 群聊输入框
+        self._group_busy = False        # 是否正在等待群聊 AI 回复
+        self._group_loaded_sections = {}  # 群聊里各角色已加载的角色卡段
         self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
@@ -257,6 +264,9 @@ class TaskApp:
         elif self._ai_center:
             self._update_appbar(None, "AI", ai=True)
             self.scroll.controls = self._render_ai_center()
+        elif self._ai_group_id is not None:
+            self._update_appbar(None, self._group_title(), ai_group=True)
+            self.scroll.controls = self._render_group_chat()
         elif self._ai_session_id is not None:
             self._update_appbar(None, self._ai_session_title(), ai_chat=True)
             self.scroll.controls = self._render_ai_chat()
@@ -276,10 +286,12 @@ class TaskApp:
         self._set_fab(not (
             self._show_done or self._search_mode or self._calendar_view
             or self._ai_center or self._ai_session_id is not None
+            or self._ai_group_id is not None
         ))
         self.page.update()
 
-    def _update_appbar(self, parent_id, title, done=False, search=False, calendar=False, ai=False, ai_chat=False):
+    def _update_appbar(self, parent_id, title, done=False, search=False,
+                       calendar=False, ai=False, ai_chat=False, ai_group=False):
         if done:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
@@ -312,6 +324,13 @@ class TaskApp:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
                 icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_ai_chat,
+            )
+            self.page.appbar.title = ft.Text(title)
+            self.page.appbar.actions = [self._settings_icon()]
+        elif ai_group:
+            self.page.appbar.leading = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK, tooltip="返回",
+                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_group_chat,
             )
             self.page.appbar.title = ft.Text(title)
             self.page.appbar.actions = [self._settings_icon()]
@@ -431,11 +450,297 @@ class TaskApp:
                 on_click=lambda e, s=sess["id"]: self._open_ai_session(s),
                 min_height=58,
             ))
+
+        controls.append(ft.Container(
+            margin=ft.Margin(top=16, left=12, right=12, bottom=4),
+            content=ft.Text("我的群聊", size=13, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_GREY_700),
+        ))
+        controls.append(ft.TextButton(
+            content="新建群聊",
+            icon=ft.Icons.GROUPS,
+            on_click=lambda e: self._open_group_creator(),
+        ))
+        groups = self.db.list_group_chats()
+        if not groups:
+            controls.append(self._hint_text("还没有群聊"))
+        for g in groups:
+            controls.append(ft.ListTile(
+                leading=ft.Icon(ft.Icons.FORUM, color=ft.Colors.INDIGO_700),
+                title=ft.Text(g["title"], max_lines=1,
+                              overflow=ft.TextOverflow.ELLIPSIS),
+                subtitle=ft.Text(
+                    f"{g['member_count']} 个角色 · {g['updated_at']}",
+                    size=11, color=ft.Colors.BLUE_GREY_400,
+                ),
+                trailing=ft.PopupMenuButton(
+                    icon=ft.Icons.MORE_VERT,
+                    icon_color=ft.Colors.BLUE_GREY_500,
+                    items=[
+                        ft.PopupMenuItem(
+                            content=ft.Text("继续"),
+                            on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
+                        ),
+                        ft.PopupMenuItem(
+                            content=ft.Text("删除"),
+                            on_click=lambda e, gid=g["id"]: self._confirm_delete_group(gid),
+                        ),
+                    ],
+                ),
+                on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
+                min_height=58,
+            ))
         return controls
 
     def _delete_ai_session(self, session_id):
         self.db.delete_ai_session(session_id)
         self._render()
+
+    # ---------- AI 群聊 ----------
+    def _open_group_creator(self, e=None):
+        cards = self.db.list_role_cards()
+        if len(cards) < 2:
+            self._toast("请先导入至少两个角色卡")
+            return
+        title_field = ft.TextField(
+            label="群聊名称",
+            hint_text="例如：周末小队",
+        )
+        checks = [
+            (card["id"], ft.Checkbox(label=card["name"], value=False))
+            for card in cards[:20]
+        ]
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("新建群聊"),
+            content=ft.Column(
+                [title_field, *[cb for _, cb in checks]],
+                tight=True,
+                spacing=8,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="创建群聊",
+                    on_click=lambda e: self._create_group_chat(
+                        title_field, checks, dlg
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _create_group_chat(self, title_field, checks, dlg):
+        selected = [card_id for card_id, cb in checks if cb.value]
+        if not 2 <= len(selected) <= 4:
+            self._toast("请选择 2~4 个角色")
+            return
+        title = (title_field.value or "").strip() or "新群聊"
+        group_id = self.db.create_group_chat(title)
+        for card_id in selected:
+            self.db.add_group_member(group_id, card_id)
+        self.page.pop_dialog()
+        self._open_group_chat(group_id)
+
+    def _confirm_delete_group(self, group_id):
+        group = self.db.get_group_chat(group_id)
+        if not group:
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("删除群聊"),
+            content=ft.Text(f"将删除「{group['title']}」及其全部群消息，确定？"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="删除",
+                    on_click=lambda e: self._delete_group_chat(group_id),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _delete_group_chat(self, group_id):
+        self.page.pop_dialog()
+        self.db.delete_group_chat(group_id)
+        if self._ai_group_id == group_id:
+            self._ai_group_id = None
+            self._group_input = None
+        self._ai_center = True
+        self._render()
+
+    def _open_group_chat(self, group_id):
+        self._ai_group_id = group_id
+        self._ai_center = False
+        self._ai_session_id = None
+        self._ai_input = None
+        self._group_input = None
+        self._render()
+
+    def _close_group_chat(self, e=None):
+        self._ai_group_id = None
+        self._group_input = None
+        self._ai_center = True
+        self._render()
+
+    def _group_title(self):
+        g = self.db.get_group_chat(self._ai_group_id) if self._ai_group_id else None
+        return g["title"] if g else "群聊"
+
+    def _render_group_chat(self):
+        g = self.db.get_group_chat(self._ai_group_id) if self._ai_group_id else None
+        if not g:
+            return [self._hint_text("群聊不存在")]
+        members = self.db.group_members(g["id"])
+        member_names = "、".join(m["name"] for m in members)
+        rows = [
+            ft.Container(
+                margin=ft.Margin(top=8, left=12, right=12, bottom=4),
+                content=ft.Text(
+                    f"群聊成员：{member_names}",
+                    size=12,
+                    color=ft.Colors.BLUE_GREY_600,
+                ),
+            )
+        ]
+        messages = self.db.get_group_messages(g["id"])
+        for i, msg in enumerate(messages):
+            label = "你" if msg["role"] == "user" else (msg.get("role_name") or "AI")
+            rows.append(self._ai_message_row(
+                msg,
+                is_last=(i == len(messages) - 1),
+                kind="chat",
+                role_label=label,
+            ))
+
+        if self._group_input is None:
+            self._group_input = ft.TextField(
+                hint_text="发到群聊，可用 @角色名 指定",
+                expand=True,
+                min_lines=1,
+                max_lines=3,
+                on_submit=self._send_group_message,
+                disabled=self._group_busy,
+            )
+        else:
+            self._group_input.disabled = self._group_busy
+        rows.append(ft.Container(
+            padding=ft.Padding(left=12, right=12, top=8, bottom=8),
+            content=ft.Row(
+                [
+                    self._group_input,
+                    ft.IconButton(
+                        icon=ft.Icons.SEND,
+                        icon_color=ft.Colors.WHITE,
+                        bgcolor=ft.Colors.BLUE_700,
+                        tooltip="发送",
+                        disabled=self._group_busy,
+                        on_click=self._send_group_message,
+                    ),
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            ),
+        ))
+        return rows
+
+    async def _send_group_message(self, e):
+        if self._ai_group_id is None or self._group_busy:
+            return
+        text = (self._group_input.value or "").strip() if self._group_input is not None else ""
+        if not text:
+            return
+        group_id = self._ai_group_id
+        self.db.append_group_message(group_id, "user", text)
+        if self._group_input is not None:
+            self._group_input.value = ""
+        self._group_busy = True
+        self._render()
+        try:
+            replies = await self._group_reply(group_id, text)
+            for role_card_id, role_name, clean in replies:
+                if clean:
+                    self.db.append_group_message(
+                        group_id, "assistant", clean,
+                        role_name=role_name, role_card_id=role_card_id,
+                    )
+        except Exception as ex:
+            self._toast(f"群聊 AI 错误：{ex}")
+        finally:
+            self._group_busy = False
+            self._render()
+
+    async def _group_reply(self, group_id, user_text):
+        members = self.db.group_members(group_id)
+        if not members:
+            return []
+        history = self.db.get_group_messages(group_id, limit=80)
+        if any(k in user_text for k in
+               ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+            for m in members:
+                state = self.db.role_card_state(m["id"])
+                state["记忆"] = (state.get("记忆", "") + "\n" + user_text).strip()
+                state["重要记忆"] = (
+                    state.get("重要记忆", "") + "\n" + user_text
+                ).strip()
+                self.db.save_role_card_state(m["id"], state)
+
+        speakers = select_group_speakers(members, user_text, history)
+        context = format_group_history(history)
+        replies = []
+        cfg = self.db.get_ai_config()
+        for card in speakers[:2]:
+            loaded = set(self._group_loaded_sections.get((group_id, card["id"]), set()))
+            final_reply = None
+            for _ in range(3):
+                loaded.update(match_world_book(card["content"], user_text))
+                self._group_loaded_sections[(group_id, card["id"])] = loaded
+                state = self.db.role_card_state(card["id"])
+                system = build_group_role_system(
+                    card["content"], state, loaded, members, context
+                )
+                if any(k in user_text for k in
+                       ("一定要记得", "别忘了", "记住", "很重要", "请记住", "非常重要")):
+                    system += (
+                        "\n\n注意：用户本轮明确要求你记住某些内容。"
+                        "请把它逐字保留到 ---STATE--- 的 重要记忆= 字段。"
+                    )
+                post = post_history_instructions(card["content"])
+                if post:
+                    system += f"\n\n[历史后置指令]\n{post}"
+                payload = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": "请根据上面的群聊消息继续说话。"},
+                ]
+                reply = await asyncio.to_thread(
+                    chat_completion,
+                    cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+                    payload,
+                )
+                clean, loads = extract_load_requests(reply)
+                if not loads:
+                    final_reply = clean
+                    break
+                loaded.update(loads)
+                self._group_loaded_sections[(group_id, card["id"])] = loaded
+            if not final_reply:
+                continue
+            clean, state = parse_state_block(final_reply)
+            if state:
+                self._merge_role_state(card["id"], state)
+            if clean:
+                state = self.db.role_card_state(card["id"])
+                group_memory = state.get("群聊记忆", "")
+                state["群聊记忆"] = (
+                    group_memory + "\n群聊中你提到：" + clean[:120]
+                ).strip()
+                self.db.save_role_card_state(card["id"], state)
+                replies.append((card["id"], card["name"], clean))
+                context += f"\n{card['name']}：{clean}"
+        return replies
 
     # ---------- 角色扮演：角色卡 ----------
     def _choose_roleplay(self):
@@ -825,6 +1130,7 @@ class TaskApp:
         emotion = state.get("当前情绪", "平静")
         memory = state.get("记忆", "")
         important = state.get("重要记忆", "")
+        group_memory = state.get("群聊记忆", "")
         if identity and identity != "未设定":
             lines = [
                 ft.Row(
@@ -882,6 +1188,10 @@ class TaskApp:
         if important:
             lines.append(ft.Text(f"重要：{important}", size=12,
                                  color=ft.Colors.BLUE_700,
+                                 max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        if group_memory:
+            lines.append(ft.Text(f"群聊：{group_memory}", size=12,
+                                 color=ft.Colors.INDIGO_700,
                                  max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
         return ft.Container(
             margin=ft.Margin(left=12, right=12, top=8, bottom=4),
@@ -2060,6 +2370,8 @@ class TaskApp:
     def _back(self, e=None):
         if self._show_done:
             self._close_done()
+        elif self._ai_group_id is not None:
+            self._close_group_chat()
         elif self._ai_session_id is not None:
             self._close_ai_chat()
         elif self._ai_center:

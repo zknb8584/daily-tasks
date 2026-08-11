@@ -570,6 +570,46 @@ def main():
     assert payload[-1]["role"] == "system"
     assert payload[-1]["content"].startswith("[历史后置指令]")
 
+    # ---- AI 群聊：DB + 选角 + 实际发送 ----
+    group_a_id = db.create_role_card("群A", "[核心]\n名字：群A\n[爱好]\n主机游戏")
+    group_b_id = db.create_role_card("群B", "[核心]\n名字：群B\n[爱好]\n音乐")
+    group_id = db.create_group_chat("测试群")
+    db.add_group_member(group_id, group_a_id)
+    db.add_group_member(group_id, group_b_id)
+    assert len(db.group_members(group_id)) == 2
+    db.append_group_message(group_id, "user", "大家聊聊游戏")
+    db.append_group_message(
+        group_id, "assistant", "我喜欢主机游戏",
+        role_name="群A", role_card_id=group_a_id,
+    )
+    assert len(db.get_group_messages(group_id)) == 2
+    group_history = ai_client.format_group_history(db.get_group_messages(group_id))
+    assert "群A" in group_history
+    forced = ai_client.select_group_speakers(
+        [{"id": group_a_id, "name": "群A", "content": "[爱好]\n主机游戏"}],
+        "@群A 晚上一起打游戏？",
+    )
+    assert forced[0]["id"] == group_a_id
+    group_system = ai_client.build_group_role_system(
+        "[核心]\n名字：群A", {}, set(),
+        [{"name": "群A"}, {"name": "群B"}],
+        group_history,
+    )
+    assert "群聊设定" in group_system
+    assert "主机游戏" in group_system
+
+    app._open_group_chat(group_id)
+    app._group_input = ft.TextField(value="@群A 晚上一起打游戏？")
+    orig_group_chat = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: "好啊，我带你打。"
+    asyncio.run(app._send_group_message(None))
+    appmod.chat_completion = orig_group_chat
+    group_msgs = db.get_group_messages(group_id)
+    assert group_msgs[-1]["role"] == "assistant"
+    assert group_msgs[-1]["role_name"] == "群A"
+    assert group_msgs[-1]["role_card_id"] == group_a_id
+    assert "群聊记忆" in db.role_card_state(group_a_id)
+
     # ---- AI 生成角色卡 ----
     gen_field = ft.TextField(value="一个叫小星的机器人")
     gen_status = ft.Text("")

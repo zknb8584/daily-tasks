@@ -190,6 +190,34 @@ class Database:
                     created_at TEXT NOT NULL
                 )"""
             )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_group_chats(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_group_members(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    role_card_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(group_id, role_card_id)
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_group_messages(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    role_name TEXT DEFAULT '',
+                    role_card_id INTEGER,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
             # 迁移：给 items 补新列（老库升级用）
             cols = [r["name"] for r in c.execute("PRAGMA table_info(items)")]
             col_sql = {
@@ -625,6 +653,82 @@ class Database:
                 "SELECT * FROM ai_messages WHERE session_id=? "
                 "ORDER BY id DESC LIMIT ?",
                 (session_id, limit),
+            ).fetchall()
+        return list(reversed([dict(r) for r in rows]))
+
+    # ---------------- AI 群聊 ----------------
+    def create_group_chat(self, title: str) -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_group_chats(title,created_at,updated_at) VALUES(?,?,?)",
+                (title, now, now),
+            )
+            return cur.lastrowid
+
+    def list_group_chats(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT g.id, g.title, g.updated_at, "
+                "(SELECT COUNT(*) FROM ai_group_members m "
+                "WHERE m.group_id=g.id) AS member_count "
+                "FROM ai_group_chats g ORDER BY g.updated_at DESC LIMIT 200"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_group_chat(self, group_id) -> dict | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_group_chats WHERE id=?", (group_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def add_group_member(self, group_id, role_card_id):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO ai_group_members("
+                "group_id,role_card_id,created_at) VALUES(?,?,?)",
+                (group_id, role_card_id, now),
+            )
+
+    def group_members(self, group_id):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT r.* FROM ai_role_cards r "
+                "JOIN ai_group_members m ON m.role_card_id=r.id "
+                "WHERE m.group_id=? ORDER BY m.id",
+                (group_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_group_chat(self, group_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_group_messages WHERE group_id=?", (group_id,))
+            c.execute("DELETE FROM ai_group_members WHERE group_id=?", (group_id,))
+            c.execute("DELETE FROM ai_group_chats WHERE id=?", (group_id,))
+
+    def append_group_message(self, group_id, role, content,
+                             role_name="", role_card_id=None):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ai_group_messages("
+                "group_id,role,role_name,role_card_id,content,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (group_id, role, role_name, role_card_id, content, now),
+            )
+            c.execute(
+                "UPDATE ai_group_chats SET updated_at=? WHERE id=?",
+                (now, group_id),
+            )
+
+    def get_group_messages(self, group_id, limit=200):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_group_messages WHERE group_id=? "
+                "ORDER BY id DESC LIMIT ?",
+                (group_id, limit),
             ).fetchall()
         return list(reversed([dict(r) for r in rows]))
 

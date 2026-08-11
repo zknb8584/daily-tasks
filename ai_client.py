@@ -4,6 +4,7 @@
 只使用 Python 标准库，方便随 Flet 打包进 Android，不引入额外网络依赖。
 """
 import json
+import random
 import re
 import urllib.error
 import urllib.request
@@ -285,6 +286,73 @@ def match_world_book(card_content: str, text: str):
     return []
 
 
+def format_group_history(messages, limit=30) -> str:
+    """把群聊消息格式化成角色能读到的最近上下文。"""
+    lines = []
+    for msg in messages[-limit:]:
+        name = "你" if msg.get("role") == "user" else (msg.get("role_name") or "AI")
+        content = str(msg.get("content") or "").strip()
+        if content:
+            lines.append(f"{name}：{content}")
+    return "\n".join(lines)
+
+
+def build_group_role_system(card_content: str, state: dict, loaded,
+                            members, history_text="") -> str:
+    """为群聊中的某个角色生成 system。"""
+    system = build_role_system(card_content, state, loaded)
+    names = "、".join(str(m.get("name") or "角色") for m in members)
+    system += f"\n\n[群聊设定]\n你正在一个群聊里，成员：{names}。"
+    if history_text:
+        system += f"\n[群聊最近消息]\n{history_text}"
+    system += (
+        "\n\n群聊规则：\n"
+        "- 只以你自己的身份说话，不要替其他成员发言。\n"
+        "- 回复不要带角色名前缀，也不要带 Markdown。\n"
+        "- 可以主动接话、抛出新话题，但一次回复 1~3 句。\n"
+        "- 其他成员已经说过的话不要逐字复读。"
+    )
+    return system
+
+
+def _role_interest_hit(member, text):
+    if f"@{member.get('name')}" in text:
+        return 2
+    if match_world_book(member.get("content") or "", text):
+        return 1
+    sections = parse_role_card(member.get("content") or "")
+    for key in ("爱好", "背景", "扩展"):
+        for line in sections.get(key, "").splitlines():
+            line = line.strip()
+            if line and line in text:
+                return 1
+    return 0
+
+
+def select_group_speakers(members, user_text="", messages=None):
+    """决定群聊这一轮由哪 1~2 个角色接话。"""
+    members = list(members or [])
+    if not members:
+        return []
+    text = user_text or ""
+    mentioned = [m for m in members if _role_interest_hit(m, text) >= 2][:2]
+    if mentioned:
+        return mentioned
+    hits = [(m, _role_interest_hit(m, text)) for m in members]
+    hits = [m for m, score in hits if score]
+    if hits:
+        return hits[:2]
+
+    last_name = None
+    for msg in reversed(messages or []):
+        if msg.get("role") == "assistant":
+            last_name = msg.get("role_name")
+            break
+    pool = [m for m in members if m.get("name") != last_name] or list(members)
+    count = 2 if len(members) >= 2 and random.random() < 0.5 else 1
+    return random.sample(pool, min(count, len(pool)))
+
+
 def build_role_system(card_content: str, state: dict, loaded=None) -> str:
     """生成角色扮演 system：
     - 始终带 [核心] 和动态状态
@@ -295,6 +363,7 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
     loaded = set(loaded or [])
     core = sections.get("核心", "")
     memory = state.get("记忆", "")
+    group_memory = state.get("群聊记忆", "")
     emotion = state.get("当前情绪", "")
     affection = state.get("好感度", "")
     important = state.get("重要记忆", "")
@@ -320,6 +389,9 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
         parts.append(f"[重要记忆]\n{important}")
     if memory:
         parts.append(f"[记忆摘要]\n{memory}")
+    if group_memory:
+        lines = group_memory.splitlines()[-6:]
+        parts.append("[群聊记忆]\n" + "\n".join(lines))
 
     # 其他静态段：未加载时给摘要，已加载时给全文
     for section in ("背景", "爱好", "说话风格", "关系", "扩展"):
