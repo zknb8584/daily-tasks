@@ -530,7 +530,7 @@ class TaskApp:
         border = ft.Border.all(
             1, ft.Colors.with_opacity(0.25, ft.Colors.LIGHT_BLUE_200)
         ) if not is_user else None
-        actions = []
+        actions = None
         if not is_user and kind == "chat" and is_last:
             actions = ft.Row(
                 [
@@ -543,6 +543,16 @@ class TaskApp:
                 ],
                 spacing=0,
             )
+        bubble_parts = [
+            ft.Text(
+                "你" if is_user else "AI",
+                size=11, color=ft.Colors.BLUE_GREY_500,
+                weight=ft.FontWeight.BOLD,
+            ),
+            ft.Text(content, size=14),
+        ]
+        if actions is not None:
+            bubble_parts.append(actions)
         return ft.Container(
             margin=ft.Margin(left=12, right=12, top=6, bottom=2),
             padding=ft.Padding(left=14, right=14, top=10, bottom=10),
@@ -550,15 +560,7 @@ class TaskApp:
             border=border,
             border_radius=12,
             content=ft.Column(
-                [
-                    ft.Text(
-                        "你" if is_user else "AI",
-                        size=11, color=ft.Colors.BLUE_GREY_500,
-                        weight=ft.FontWeight.BOLD,
-                    ),
-                    ft.Text(content, size=14, selectable=True),
-                    actions,
-                ],
+                bubble_parts,
                 spacing=6,
                 tight=True,
             ),
