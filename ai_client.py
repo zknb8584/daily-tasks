@@ -175,7 +175,7 @@ def extract_tasks(text: str):
 # ---------------------------------------------------------------------------
 # 角色卡解析 / 动态状态 / 按需加载
 # ---------------------------------------------------------------------------
-ROLE_SECTIONS = ["核心", "背景", "说话风格", "关系", "扩展",
+ROLE_SECTIONS = ["核心", "背景", "爱好", "说话风格", "关系", "扩展",
                  "记忆", "当前情绪", "好感度",
                  "系统提示", "历史后置指令", "世界书"]
 
@@ -298,6 +298,7 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
     emotion = state.get("当前情绪", "")
     affection = state.get("好感度", "")
     important = state.get("重要记忆", "")
+    identity = state.get("身份", "")
     card_system = sections.get("系统提示", "")
 
     parts = [SKILL_BY_ID["roleplay"]["system"]]
@@ -307,6 +308,8 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
             + card_system
         )
     parts.append("以下是角色卡信息：")
+    if identity:
+        parts.append(f"[当前身份]\n{identity}")
     if core:
         parts.append(f"[核心]\n{core}")
     if affection:
@@ -319,7 +322,7 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
         parts.append(f"[记忆摘要]\n{memory}")
 
     # 其他静态段：未加载时给摘要，已加载时给全文
-    for section in ("背景", "说话风格", "关系", "扩展"):
+    for section in ("背景", "爱好", "说话风格", "关系", "扩展"):
         content = sections.get(section, "")
         if not content:
             continue
@@ -356,8 +359,13 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
         "规则：\n"
         "- 像真人一样说话：用短句、口语、自然停顿；不要列点、不要总结、不要解释你在做什么。\n"
         "- 可以用（动作）或 *动作* 表达表情、语气和小动作，但不要每句都加。\n"
-        "- 根据角色卡称呼用户；按 [当前情绪] 和 [好感度] 调整语气和亲疏度。\n"
+        "- 根据 [当前身份] 称呼用户；按 [当前情绪] 和 [好感度] 调整语气和亲疏度。\n"
+        "- 如果 [当前身份] 与角色卡 [关系] 有冲突，以 [当前身份] 为准。\n"
         "- 默认回复 1~3 句，除非用户明确要求长回答。\n"
+        "- 不要只被动等用户说话：每隔 2~4 轮可以主动问一句或抛出一个新话题。\n"
+        "- 主动话题要具体，尽量从 [爱好] [背景] [扩展] [世界书] 里选，"
+        "不要问“你有什么爱好？”这种万能问题，而是直接提一件角色会关心的具体事。\n"
+        "- 话题要符合当前身份、情绪和好感度；刚认识时克制，关系近后可以更自然。\n"
         "- 不要复读用户原话，不要先复述问题再回答。\n"
         "- 不要用“一切都会好起来的”“你要相信自己”这类万能安慰。\n"
         "- 避免堆叠夸张形容词、副词、空洞比喻和戏剧化感叹。\n"
@@ -409,6 +417,7 @@ def tavern_to_role_card(data: dict) -> str:
     name = str(data.get("name") or data.get("角色名") or "AI 角色")
     desc = str(data.get("description") or data.get("人设") or "")
     personality = str(data.get("personality") or data.get("性格") or "")
+    hobbies = str(data.get("hobbies") or data.get("爱好") or "")
     scenario = str(data.get("scenario") or data.get("背景") or "")
     first_mes = str(data.get("first_mes") or data.get("开场白") or "")
     mes_example = str(data.get("mes_example") or data.get("示例对话") or "")
@@ -426,6 +435,8 @@ def tavern_to_role_card(data: dict) -> str:
             lines.append(f"人设：{desc}")
     if personality:
         lines += ["", "[说话风格]", personality]
+    if hobbies:
+        lines += ["", "[爱好]", hobbies]
     if scenario:
         lines += ["", "[背景]", scenario]
     if first_mes or mes_example:

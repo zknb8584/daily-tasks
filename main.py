@@ -48,7 +48,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.1.1"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.1.2"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -449,6 +449,51 @@ class TaskApp:
             "还没有角色卡，先导入一份角色卡文件（txt 或 json）",
             size=12, color=ft.Colors.BLUE_GREY_600,
         ) if not cards else ft.Text("", size=12)
+        relation_dd = ft.Dropdown(
+            label="初始身份",
+            value="陌生人",
+            options=[
+                ft.dropdown.Option(key="陌生人", text="陌生人"),
+                ft.dropdown.Option(key="同学", text="同学"),
+                ft.dropdown.Option(key="朋友", text="朋友"),
+                ft.dropdown.Option(key="同事", text="同事"),
+                ft.dropdown.Option(key="师生", text="师生"),
+                ft.dropdown.Option(key="家人", text="家人"),
+                ft.dropdown.Option(key="恋人", text="恋人"),
+                ft.dropdown.Option(key="青梅竹马", text="青梅竹马"),
+            ],
+        )
+        affection_dd = ft.Dropdown(
+            label="初始好感度",
+            value="0 中立",
+            options=[
+                ft.dropdown.Option(key="-20 疏远", text="-20 疏远"),
+                ft.dropdown.Option(key="0 中立", text="0 中立"),
+                ft.dropdown.Option(key="30 友好", text="30 友好"),
+                ft.dropdown.Option(key="60 亲近", text="60 亲近"),
+                ft.dropdown.Option(key="90 信赖", text="90 信赖"),
+                ft.dropdown.Option(key="120 亲密", text="120 亲密"),
+                ft.dropdown.Option(key="180 依恋", text="180 依恋"),
+            ],
+        )
+        affection_by_relation = {
+            "陌生人": "0 中立",
+            "同学": "30 友好",
+            "朋友": "60 亲近",
+            "同事": "30 友好",
+            "师生": "30 友好",
+            "家人": "90 信赖",
+            "恋人": "120 亲密",
+            "青梅竹马": "90 信赖",
+        }
+
+        def _sync_affection(e):
+            affection_dd.value = affection_by_relation.get(
+                relation_dd.value, affection_dd.value
+            )
+            self.page.update()
+
+        relation_dd.on_change = _sync_affection
         actions = [
             ft.TextButton(
                 "导入角色卡",
@@ -461,7 +506,9 @@ class TaskApp:
             ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
             ft.FilledButton(
                 content="开始对话",
-                on_click=lambda e: self._begin_roleplay(dropdown.value, dlg),
+                on_click=lambda e: self._begin_roleplay(
+                    dropdown.value, dlg, relation_dd.value, affection_dd.value
+                ),
             ),
         ]
         if cards:
@@ -477,6 +524,8 @@ class TaskApp:
                     status,
                     dropdown if cards else ft.Text("暂无角色卡", size=13,
                                                    color=ft.Colors.GREY),
+                    relation_dd if cards else ft.Text(""),
+                    affection_dd if cards else ft.Text(""),
                 ],
                 tight=True,
                 spacing=10,
@@ -530,8 +579,9 @@ class TaskApp:
         try:
             system = (
                 "你是一个角色卡创作者。根据用户的一句话描述，生成一份固定格式的角色卡文本，"
-                "只使用这些段名：[核心] [背景] [说话风格] [关系] [扩展]。"
+                "只使用这些段名：[核心] [背景] [爱好] [说话风格] [关系] [扩展]。"
                 "[核心] 第一行写“名字：xxx”，第二行写一句话人设。"
+                "[爱好] 写 2~4 个具体爱好，方便角色主动发起话题。"
                 "内容要具体、有记忆点，语气符合角色设定，不要出现“作为AI”之类的话，"
                 "不要输出 Markdown 代码块，也不要输出多余解释。"
             )
@@ -595,7 +645,7 @@ class TaskApp:
         self._toast("角色卡已删除")
         self._choose_roleplay()
 
-    def _begin_roleplay(self, card_id, dlg=None):
+    def _begin_roleplay(self, card_id, dlg=None, relation=None, affection=None):
         if dlg is not None:
             self.page.pop_dialog()
         if not card_id:
@@ -613,10 +663,55 @@ class TaskApp:
                 break
         if existing:
             sid = existing["id"]
+            state = self.db.role_card_state(card_id)
+            state_changed = (
+                (relation and state.get("身份") != relation)
+                or (affection and state.get("好感度") != affection)
+            )
+            if state_changed:
+                confirm = ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("应用初始设定"),
+                    content=ft.Text(
+                        f"「{card['name']}」已有长期聊天框。"
+                        f"将身份设为「{relation}」、好感度设为「{affection}」，"
+                        "聊天记录会保留。确定？"
+                    ),
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                        ft.FilledButton(
+                            content="应用并继续",
+                            on_click=lambda e: self._apply_role_initial(
+                                card_id, sid, relation, affection
+                            ),
+                        ),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                )
+                self.page.show_dialog(confirm)
+                return
         else:
             sid = self.db.create_ai_session(
                 "roleplay", f"角色扮演 · {card['name']}", role_card_id=card_id
             )
+            if relation or affection:
+                self._apply_role_initial(
+                    card_id, sid, relation, affection, pop_dialog=False
+                )
+                return
+        self._ai_session_id = sid
+        self._ai_center = False
+        self._render()
+
+    def _apply_role_initial(self, card_id, sid, relation, affection, pop_dialog=True):
+        if pop_dialog:
+            self.page.pop_dialog()
+        state = self.db.role_card_state(card_id)
+        if relation:
+            state["身份"] = relation
+        if affection:
+            state["好感度"] = affection
+        self.db.save_role_card_state(card_id, state)
         self._ai_session_id = sid
         self._ai_center = False
         self._render()
@@ -725,26 +820,61 @@ class TaskApp:
 
     def _role_state_card(self, card_id, session_id):
         state = self.db.role_card_state(card_id)
+        identity = state.get("身份", "未设定")
         affection = state.get("好感度", "未建立")
         emotion = state.get("当前情绪", "平静")
         memory = state.get("记忆", "")
         important = state.get("重要记忆", "")
-        lines = [
-            ft.Row(
-                [
-                    ft.Text("好感度", size=11, color=ft.Colors.BLUE_GREY_500),
-                    ft.Text(str(affection), size=13, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.BLUE_700),
-                    ft.Container(width=8),
-                    ft.Text("情绪", size=11, color=ft.Colors.BLUE_GREY_500),
-                    ft.Text(str(emotion), size=13, color=ft.Colors.BLUE_GREY_700),
-                    ft.Container(expand=True),
-                    ft.TextButton("重置关系", on_click=lambda e: self._reset_role_relation(card_id)),
-                ],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-        ]
+        if identity and identity != "未设定":
+            lines = [
+                ft.Row(
+                    [
+                        ft.Text("身份", size=11, color=ft.Colors.BLUE_GREY_500),
+                        ft.Text(str(identity), size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_700),
+                        ft.Container(expand=True),
+                        ft.TextButton(
+                            "重置关系",
+                            on_click=lambda e: self._reset_role_relation(card_id),
+                        ),
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Text("好感度", size=11, color=ft.Colors.BLUE_GREY_500),
+                        ft.Text(str(affection), size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_700),
+                        ft.Container(width=10),
+                        ft.Text("情绪", size=11, color=ft.Colors.BLUE_GREY_500),
+                        ft.Text(str(emotion), size=13, color=ft.Colors.BLUE_GREY_700),
+                        ft.Container(expand=True),
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ]
+        else:
+            lines = [
+                ft.Row(
+                    [
+                        ft.Text("好感度", size=11, color=ft.Colors.BLUE_GREY_500),
+                        ft.Text(str(affection), size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_700),
+                        ft.Container(width=10),
+                        ft.Text("情绪", size=11, color=ft.Colors.BLUE_GREY_500),
+                        ft.Text(str(emotion), size=13, color=ft.Colors.BLUE_GREY_700),
+                        ft.Container(expand=True),
+                        ft.TextButton(
+                            "重置关系",
+                            on_click=lambda e: self._reset_role_relation(card_id),
+                        ),
+                    ],
+                    spacing=4,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            ]
         if memory:
             lines.append(ft.Text(f"记忆：{memory}", size=12,
                                  color=ft.Colors.BLUE_GREY_600,

@@ -518,6 +518,10 @@ def main():
     assert db.role_card_state(card_id) == {}
     assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
 
+    app._begin_roleplay(card_id, None, "同学", "30 友好")
+    assert db.role_card_state(card_id)["身份"] == "同学"
+    assert db.role_card_state(card_id)["好感度"] == "30 友好"
+
     # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
     v2_file = os.path.join(tmp, "v2_role.json")
     with open(v2_file, "w", encoding="utf-8") as f:
@@ -602,11 +606,13 @@ def main():
         "name": "娜娜",
         "description": "猫耳少女",
         "personality": "说话简短，喜欢用喵",
+        "hobbies": "主机游戏，音乐",
         "scenario": "住在一间旧书店",
     })
     parsed = ai_client.parse_role_card(tavern)
     assert parsed["核心"].startswith("名字：娜娜")
     assert "喵" in parsed["说话风格"]
+    assert "主机游戏" in parsed["爱好"]
     assert "旧书店" in parsed["背景"]
 
     card_v2 = ai_client.tavern_to_role_card({
@@ -642,6 +648,15 @@ def main():
     assert "AI 腔" in role_system
     assert "万能安慰" in role_system
     assert "具体的行动、反应或新情境" in role_system
+
+    role_system_identity = ai_client.build_role_system(
+        "[核心]\n名字：测试角色\n[爱好]\n主机游戏\n音乐",
+        {"身份": "同学", "好感度": "30 友好"},
+    )
+    assert "[当前身份]" in role_system_identity
+    assert "同学" in role_system_identity
+    assert "主机游戏" in role_system_identity
+    assert "主动问一句或抛出一个新话题" in role_system_identity
 
     role_system_v2 = ai_client.build_role_system(card_v2, {})
     assert "优先级最高" in role_system_v2
