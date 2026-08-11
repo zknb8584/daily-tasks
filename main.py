@@ -1994,8 +1994,10 @@ class TaskApp:
         self._render()
 
     def _undo_completed(self, item_id):
-        """撤销完成：整组（含后代）恢复未完成，放回首页。"""
+        """撤销完成：该子树变未完成，并把祖先链一起放回首页；同层其他项保持完成。"""
         self.db.set_subtree_done(item_id, False)
+        for anc in self.db.ancestors(item_id):
+            self.db.set_done(anc, False)
         self._render()
 
     def _all_done_items(self):

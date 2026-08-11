@@ -529,6 +529,26 @@ def main():
     appmod.chat_completion = orig_chat
     assert any(c["name"] == "小星" for c in db.list_role_cards())
 
+    # ---- 删除子项目撤销：恢复完整结构并挂回原父 ----
+    parent = db.add(None, "结构父")
+    child = db.add(parent, "结构子")
+    grand = db.add(child, "结构孙")
+    snap3 = db.snapshot_subtree(child)
+    db.delete(child)
+    restored_child = db.restore_subtree(snap3)
+    assert db.get(restored_child)["parent_id"] == parent
+    assert any(x["title"] == "结构孙" for x in db.children(restored_child))
+
+    # ---- 完成撤销：祖先链一起返回，同层兄弟保持已完成 ----
+    p2 = db.add(None, "链父")
+    c2a = db.add(p2, "链子A")
+    c2b = db.add(p2, "链子B")
+    db.set_subtree_done(p2, True)
+    app._undo_completed(c2a)
+    assert db.get(p2)["done"] == 0
+    assert db.get(c2a)["done"] == 0
+    assert db.get(c2b)["done"] == 1
+
     print("UI TEST OK")
 
 

@@ -630,7 +630,7 @@ class Database:
 
     # ---------------- 子树快照 / 恢复（滑动删除撤销） ----------------
     def snapshot_subtree(self, item_id) -> dict:
-        """导出整棵子树（含根 + 完成日志），供 Dismissible 删除后一键撤销重建。"""
+        """导出整棵子树（含根 + 完成日志 + 原父 id），供删除后一键撤销重建。"""
         ids = self._subtree_ids(item_id)
         q = ",".join("?" * len(ids))
         with self._conn() as c:
@@ -641,7 +641,12 @@ class Database:
                 f"SELECT item_id, done_at FROM completions WHERE item_id IN ({q}) ORDER BY id",
                 ids,
             ).fetchall()
-        return {"items": [dict(r) for r in rows], "completions": [dict(r) for r in comp]}
+            root = c.execute("SELECT parent_id FROM items WHERE id=?", (item_id,)).fetchone()
+        return {
+            "items": [dict(r) for r in rows],
+            "completions": [dict(r) for r in comp],
+            "root_parent_id": root["parent_id"] if root else None,
+        }
 
     def restore_subtree(self, snapshot: dict) -> int:
         """恢复快照中的整棵子树（自动重映射 id），返回新根 id。"""
@@ -653,6 +658,13 @@ class Database:
                 if not title:
                     continue
                 parent = old_to_new.get(it.get("parent_id"))
+                if parent is None and it.get("parent_id") is not None:
+                    # 父节点不在快照里（例如只删了子项目）：若原父仍存在则挂回原处
+                    exists = c.execute(
+                        "SELECT 1 FROM items WHERE id=?", (it.get("parent_id"),)
+                    ).fetchone()
+                    if exists:
+                        parent = it.get("parent_id")
                 cur = c.execute(
                     "INSERT INTO items(parent_id,title,deadline,done,created_at,"
                     "tag_id,note,repeat_type,repeat_interval) "
@@ -670,7 +682,7 @@ class Database:
                     ),
                 )
                 old_to_new[it["id"]] = cur.lastrowid
-                if it.get("parent_id") is None:
+                if it.get("parent_id") is None or new_root is None:
                     new_root = cur.lastrowid
             # 完成日志重映射到新 id，撤销后统计不丢历史
             for comp in snapshot.get("completions", []):
@@ -681,6 +693,21 @@ class Database:
                         (new_item, comp.get("done_at", "")),
                     )
         return new_root
+
+    def ancestors(self, item_id):
+        """返回从根到父的 id 列表（不含自身）。"""
+        ids = []
+        cur = item_id
+        with self._conn() as c:
+            while True:
+                row = c.execute(
+                    "SELECT parent_id FROM items WHERE id=?", (cur,)
+                ).fetchone()
+                if not row or row["parent_id"] is None:
+                    break
+                ids.append(row["parent_id"])
+                cur = row["parent_id"]
+        return list(reversed(ids))
 
     # ---------------- 自定义背景图 ----------------
     def set_bg_image(self, src_path) -> str:
