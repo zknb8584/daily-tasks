@@ -63,6 +63,8 @@ AI_SKILLS = [
             "[核心]\n名字：xxx\n人设：一句话\n"
             "[背景]\n[爱好]\n[说话风格]\n[关系]\n[开场白]\n[示例对话]\n[作者备注]\n[扩展]\n"
             "内容要具体、有记忆点，不要输出 Markdown 代码块，也不要输出多余解释。"
+            "每轮回复末尾输出 ---PROGRESS--- 标记已覆盖项（每行“项:done”），"
+            "并输出 ---SUMMARY--- 记录已经确认的设定摘要，供下一轮继续使用。"
         ),
     },
     {
@@ -200,6 +202,58 @@ def extract_role_card(text: str) -> str:
     if body.startswith("```"):
         body = body.strip("`").strip()
     return body
+
+
+GRILL_PROGRESS_ITEMS = [
+    "核心", "背景", "性格", "说话风格", "爱好", "关系",
+    "弱点", "习惯", "记忆点", "开场白",
+]
+
+
+def parse_grill_state(text: str):
+    """从 Grill-me 回复中拆出进度和设定摘要。"""
+    clean = text or ""
+    progress = []
+    summary = ""
+    for marker, key in (
+        ("---PROGRESS---", "progress"),
+        ("---SUMMARY---", "summary"),
+    ):
+        idx = clean.find(marker)
+        if idx == -1:
+            continue
+        end = len(clean)
+        for other in ("---PROGRESS---", "---SUMMARY---", "---STATE---"):
+            other_idx = clean.find(other, idx + len(marker))
+            if other_idx != -1:
+                end = min(end, other_idx)
+        block = clean[idx + len(marker):end].strip()
+        clean = (clean[:idx] + clean[end:]).strip()
+        if key == "progress":
+            for line in block.splitlines():
+                if ":" in line or "：" in line:
+                    part = line.split(":", 1)[-1].split("：", 1)[-1].strip().lower()
+                    if part in ("done", "完成", "是", "ok", "yes"):
+                        progress.append(line.split(":", 1)[0].split("：", 1)[0].strip())
+        else:
+            summary = block
+    seen = []
+    for p in progress:
+        if p and p not in seen:
+            seen.append(p)
+    return clean, seen, summary
+
+
+def extract_scene_change(directives):
+    """从括号指令中提取场景切换。"""
+    for d in directives or []:
+        d = d.strip()
+        for prefix in ("场景切换：", "场景："):
+            if d.startswith(prefix):
+                scene = d[len(prefix):].strip()
+                if scene:
+                    return scene
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +474,16 @@ def select_group_speakers(members, user_text="", messages=None):
     if not members:
         return []
     text = user_text or ""
-    mentioned = [m for m in members if _role_interest_hit(m, text) >= 2][:2]
+    mentioned = [m for m in members if _role_interest_hit(m, text) >= 2]
     if mentioned:
-        return mentioned
+        if len(mentioned) >= 2:
+            return mentioned[:4]
+        total = random.choice([1, 2, 3])
+        if total == 1 or len(members) == 1:
+            return mentioned
+        others = [m for m in members if m.get("name") != mentioned[0].get("name")]
+        random.shuffle(others)
+        return [mentioned[0]] + others[:min(total - 1, len(others))]
     hits = [(m, _role_interest_hit(m, text)) for m in members]
     hits = [m for m, score in hits if score]
     if hits:

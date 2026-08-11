@@ -540,6 +540,7 @@ def main():
         }, f, ensure_ascii=False)
     app.file_picker = FakePicker(files=[types.SimpleNamespace(path=v2_file, bytes=None)])
     asyncio.run(app._import_role_card(None))
+    app._create_imported_role_card(types.SimpleNamespace(value=""), None)
     imported = [c for c in db.list_role_cards() if c["name"] == "V2导入"]
     assert len(imported) == 1
     assert "旧书店老板" in imported[0]["content"]
@@ -599,6 +600,15 @@ def main():
         "（场景切换：晚上）@群A 一起打游戏？",
     )
     assert forced[0]["id"] == group_a_id
+    three_members = [
+        {"id": group_a_id, "name": "群A", "content": "[爱好]\n主机游戏"},
+        {"id": group_b_id, "name": "群B", "content": "[爱好]\n音乐"},
+        {"id": 999, "name": "群C", "content": "[爱好]\n阅读"},
+    ]
+    for _ in range(20):
+        picked = ai_client.select_group_speakers(three_members, "@群A 一起聊？")
+        assert 1 <= len(picked) <= 3
+        assert any(m["id"] == group_a_id for m in picked)
     group_system = ai_client.build_group_role_system(
         "[核心]\n名字：群A", {}, set(),
         [{"name": "群A"}, {"name": "群B"}],
@@ -610,7 +620,9 @@ def main():
     assert "导演指令" in group_system
 
     app._open_group_chat(group_id)
-    app._group_input = ft.TextField(value="（场景切换：晚上）@群A 一起打游戏？")
+    app._group_input = ft.TextField(
+        value="（场景切换：晚上）（只让A回）@群A 一起打游戏？"
+    )
     app._on_key(types.SimpleNamespace(key="Delete", ctrl=False))
     assert app._ai_group_id == group_id
     orig_group_chat = appmod.chat_completion
@@ -622,6 +634,32 @@ def main():
     assert group_msgs[-1]["role_name"] == "群A"
     assert group_msgs[-1]["role_card_id"] == group_a_id
     assert "群聊记忆" in db.role_card_state(group_a_id)
+
+    # ---- 世界观档案 + 当前场景 + Grill 状态解析 ----
+    wid = db.create_world("测试世界", "旧城")
+    wcard_id = db.create_role_card(
+        "世界角色", "[核心]\n名字：世界角色", world_id=wid
+    )
+    db.update_world(wid, content="新城")
+    assert "[世界观]" in db.get_role_card(wcard_id)["content"]
+    assert "新城" in db.get_role_card(wcard_id)["content"]
+    assert db.delete_world(wid) is False
+    db.update_role_card(wcard_id, world_id=None)
+    assert db.delete_world(wid) is True
+    scene_sid = db.create_ai_session("roleplay", "场景测试")
+    db.set_ai_session_scene(scene_sid, "夜晚")
+    assert db.get_ai_session_scene(scene_sid) == "夜晚"
+    scene_gid = db.create_group_chat("场景群")
+    db.set_group_scene(scene_gid, "雨天")
+    assert db.get_group_scene(scene_gid) == "雨天"
+    clean_prog, progress, summary = ai_client.parse_grill_state(
+        "先问背景。\n---PROGRESS---\n核心:done\n背景:done\n"
+        "---SUMMARY---\n已确认核心设定"
+    )
+    assert progress == ["核心", "背景"]
+    assert summary == "已确认核心设定"
+    assert "---PROGRESS---" not in clean_prog
+    assert ai_client.extract_scene_change(["场景切换：夜晚"]) == "夜晚"
 
     # ---- AI 生成角色卡 ----
     gen_field = ft.TextField(value="一个叫小星的机器人")
@@ -741,7 +779,7 @@ def main():
 
     # ---- Grill-me 拷问角色卡：技能、提取、落库 ----
     assert any(s["id"] == "role_grill" for s in ai_client.AI_SKILLS)
-    app._start_role_grill(None)
+    app._begin_role_grill(types.SimpleNamespace(value=""), None)
     assert db.get_ai_session(app._ai_session_id)["skill_id"] == "role_grill"
     grilled_card = (
         "总结：角色已经很具体。\n"
@@ -751,7 +789,11 @@ def main():
     )
     extracted = ai_client.extract_role_card(grilled_card)
     assert "名字：拷问角色" in extracted
-    app._create_role_from_ai(extracted)
+    app._create_role_from_ai(
+        extracted,
+        types.SimpleNamespace(value=""),
+        types.SimpleNamespace(value=""),
+    )
     assert any(c["name"] == "拷问角色" for c in db.list_role_cards())
 
     print("UI TEST OK")

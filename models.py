@@ -36,6 +36,7 @@ def _data_dir() -> str:
 DATA_DIR = _data_dir()
 DB_PATH = os.path.join(DATA_DIR, "tasks.db")
 QUOTES_PATH = os.path.join(DATA_DIR, "quotes.txt")
+_UNSET = object()
 
 # 标签调色板大小（颜色索引取 0..N-1，循环分配）
 TAG_PALETTE_SIZE = 12
@@ -182,6 +183,15 @@ class Database:
                 )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_worlds(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    content TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
                 """CREATE TABLE IF NOT EXISTS ai_messages(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id INTEGER NOT NULL,
@@ -232,9 +242,18 @@ class Database:
             sess_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_sessions)")]
             if "role_card_id" not in sess_cols:
                 c.execute("ALTER TABLE ai_sessions ADD COLUMN role_card_id INTEGER")
+            if "current_scene" not in sess_cols:
+                c.execute("ALTER TABLE ai_sessions ADD COLUMN current_scene TEXT DEFAULT ''")
+            if "meta" not in sess_cols:
+                c.execute("ALTER TABLE ai_sessions ADD COLUMN meta TEXT DEFAULT '{}'")
             card_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_role_cards)")]
             if "state" not in card_cols:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN state TEXT DEFAULT '{}'")
+            if "world_id" not in card_cols:
+                c.execute("ALTER TABLE ai_role_cards ADD COLUMN world_id INTEGER")
+            group_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_group_chats)")]
+            if "current_scene" not in group_cols:
+                c.execute("ALTER TABLE ai_group_chats ADD COLUMN current_scene TEXT DEFAULT ''")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -546,6 +565,100 @@ class Database:
     def clear_ai_key(self):
         self.set_setting("ai_api_key", "")
 
+    # ---------------- AI 世界观档案 ----------------
+    def create_world(self, name: str, content: str = "") -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_worlds(name,content,created_at,updated_at) "
+                "VALUES(?,?,?,?)",
+                (name.strip(), content.strip(), now, now),
+            )
+            return cur.lastrowid
+
+    def list_worlds(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT w.*, "
+                "(SELECT COUNT(*) FROM ai_role_cards r WHERE r.world_id=w.id) "
+                "AS card_count "
+                "FROM ai_worlds w ORDER BY w.updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_world(self, world_id):
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM ai_worlds WHERE id=?", (world_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_world(self, world_id, name=None, content=None):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute("SELECT name, content FROM ai_worlds WHERE id=?", (world_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            new_name = (name if name is not None else row["name"]).strip()
+            new_content = (content if content is not None else row["content"]).strip()
+            c.execute(
+                "UPDATE ai_worlds SET name=?, content=?, updated_at=? WHERE id=?",
+                (new_name, new_content, now, world_id),
+            )
+        self._sync_world_to_role_cards(world_id)
+
+    def _sync_world_to_role_cards(self, world_id):
+        world = self.get_world(world_id)
+        if not world:
+            return
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, content FROM ai_role_cards WHERE world_id=?",
+                (world_id,),
+            ).fetchall()
+            for row in rows:
+                content = row["content"] or ""
+                lines = []
+                in_world = False
+                replaced = False
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("[") and stripped.endswith("]"):
+                        section = stripped[1:-1].strip()
+                        in_world = section == "世界观"
+                        if in_world:
+                            replaced = True
+                            continue
+                    if in_world:
+                        continue
+                    lines.append(line)
+                body = (world["name"] + "\n" + world["content"]).strip()
+                new_content = "\n".join(lines).strip()
+                if replaced or body:
+                    new_content = new_content.rstrip()
+                    new_content += f"\n\n[世界观]\n{body}"
+                c.execute(
+                    "UPDATE ai_role_cards SET content=? WHERE id=?",
+                    (new_content.strip(), row["id"]),
+                )
+
+    def delete_world(self, world_id) -> bool:
+        with self._conn() as c:
+            bound = c.execute(
+                "SELECT COUNT(*) n FROM ai_role_cards WHERE world_id=?", (world_id,)
+            ).fetchone()["n"]
+            if bound:
+                return False
+            c.execute("DELETE FROM ai_worlds WHERE id=?", (world_id,))
+            return True
+
+    def role_cards_by_world(self, world_id):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_role_cards WHERE world_id=? ORDER BY created_at DESC",
+                (world_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------------- AI 会话 ----------------
     def create_ai_session(self, skill_id: str, title: str, project_id=None,
                           role_card_id=None) -> int:
@@ -558,14 +671,29 @@ class Database:
             )
             return cur.lastrowid
 
-    def create_role_card(self, name: str, content: str) -> int:
+    def create_role_card(self, name: str, content: str, world_id=None) -> int:
         now = dt.datetime.now().isoformat(timespec="seconds")
         with self._conn() as c:
             cur = c.execute(
-                "INSERT INTO ai_role_cards(name,content,created_at) VALUES(?,?,?)",
-                (name.strip(), content.strip(), now),
+                "INSERT INTO ai_role_cards(name,content,world_id,created_at) "
+                "VALUES(?,?,?,?)",
+                (name.strip(), content.strip(), world_id, now),
             )
             return cur.lastrowid
+
+    def update_role_card(self, card_id, name=None, content=None, world_id=_UNSET):
+        with self._conn() as c:
+            cur = c.execute("SELECT * FROM ai_role_cards WHERE id=?", (card_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            new_name = (name if name is not None else row["name"]).strip()
+            new_content = (content if content is not None else row["content"]).strip()
+            new_world = row["world_id"] if world_id is _UNSET else world_id
+            c.execute(
+                "UPDATE ai_role_cards SET name=?, content=?, world_id=? WHERE id=?",
+                (new_name, new_content, new_world, card_id),
+            )
 
     def list_role_cards(self):
         with self._conn() as c:
@@ -656,6 +784,39 @@ class Database:
             ).fetchall()
         return list(reversed([dict(r) for r in rows]))
 
+    def get_ai_session_scene(self, session_id) -> str:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT current_scene FROM ai_sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+        return (row["current_scene"] if row else "") or ""
+
+    def set_ai_session_scene(self, session_id, scene: str):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_sessions SET current_scene=? WHERE id=?",
+                (scene.strip(), session_id),
+            )
+
+    def get_ai_session_meta(self, session_id) -> dict:
+        with self._conn() as c:
+            row = c.execute("SELECT meta FROM ai_sessions WHERE id=?", (session_id,)).fetchone()
+        if not row:
+            return {}
+        try:
+            meta = json.loads(row["meta"] or "{}")
+            return meta if isinstance(meta, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def set_ai_session_meta(self, session_id, meta: dict):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_sessions SET meta=? WHERE id=?",
+                (json.dumps(meta, ensure_ascii=False), session_id),
+            )
+
     # ---------------- AI 群聊 ----------------
     def create_group_chat(self, title: str) -> int:
         now = dt.datetime.now().isoformat(timespec="seconds")
@@ -731,6 +892,21 @@ class Database:
                 (group_id, limit),
             ).fetchall()
         return list(reversed([dict(r) for r in rows]))
+
+    def get_group_scene(self, group_id) -> str:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT current_scene FROM ai_group_chats WHERE id=?",
+                (group_id,),
+            ).fetchone()
+        return (row["current_scene"] if row else "") or ""
+
+    def set_group_scene(self, group_id, scene: str):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_group_chats SET current_scene=? WHERE id=?",
+                (scene.strip(), group_id),
+            )
 
     # ---------------- 子树快照 / 恢复（滑动删除撤销） ----------------
     def snapshot_subtree(self, item_id) -> dict:
@@ -853,13 +1029,22 @@ class Database:
         with self._conn() as c:
             items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY id")]
             tags = [dict(r) for r in c.execute("SELECT * FROM tags ORDER BY id")]
+            role_cards = [
+                dict(r) for r in c.execute(
+                    "SELECT id,name,content,world_id,created_at "
+                    "FROM ai_role_cards ORDER BY id"
+                )
+            ]
+            worlds = [dict(r) for r in c.execute("SELECT * FROM ai_worlds ORDER BY id")]
         return json.dumps(
             {
                 "app": "daily_tasks",
-                "version": 2,
+                "version": 3,
                 "exported_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "items": items,
                 "tags": tags,
+                "role_cards": role_cards,
+                "worlds": worlds,
             },
             ensure_ascii=False,
             indent=2,
@@ -896,6 +1081,36 @@ class Database:
                         it.get("repeat_interval", 0),
                     ),
                 )
+            if "role_cards" in data or "worlds" in data:
+                c.execute("DELETE FROM ai_group_members")
+                c.execute("DELETE FROM ai_role_cards")
+                c.execute("DELETE FROM ai_worlds")
+                for w in data.get("worlds", []):
+                    c.execute(
+                        "INSERT INTO ai_worlds(id,name,content,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?)",
+                        (
+                            w["id"],
+                            w.get("name", ""),
+                            w.get("content", ""),
+                            w.get("created_at", ""),
+                            w.get("updated_at", ""),
+                        ),
+                    )
+                for r in data.get("role_cards", []):
+                    c.execute(
+                        "INSERT INTO ai_role_cards("
+                        "id,name,content,world_id,state,created_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            r["id"],
+                            r.get("name", ""),
+                            r.get("content", ""),
+                            r.get("world_id"),
+                            "{}",
+                            r.get("created_at", ""),
+                        ),
+                    )
 
     def import_plan(self, text: str) -> int:
         """从外部「导入计划」：把文件里的任务树【追加】进来，不覆盖现有数据。
