@@ -46,6 +46,7 @@ from ai_client import (
     parse_role_card,
     parse_state_block,
     post_history_instructions,
+    role_greeting,
     select_group_speakers,
     tavern_to_role_card,
 )
@@ -53,7 +54,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.2.2"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.3.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -894,9 +895,13 @@ class TaskApp:
         try:
             system = (
                 "你是一个角色卡创作者。根据用户的一句话描述，生成一份固定格式的角色卡文本，"
-                "只使用这些段名：[核心] [背景] [爱好] [说话风格] [关系] [扩展]。"
+                "只使用这些段名："
+                "[核心] [背景] [爱好] [说话风格] [关系] [扩展] [开场白] [示例对话]。"
                 "[核心] 第一行写“名字：xxx”，第二行写一句话人设。"
                 "[爱好] 写 2~4 个具体爱好，方便角色主动发起话题。"
+                "[开场白] 写角色第一次见到用户时会说的话，1~3 句。"
+                "[示例对话] 写 2~3 轮最能体现角色语气、反应方式和口头禅的对话，"
+                "格式用“用户：”和“角色名：”分行。"
                 "内容要具体、有记忆点，语气符合角色设定，不要出现“作为AI”之类的话，"
                 "不要输出 Markdown 代码块，也不要输出多余解释。"
             )
@@ -978,6 +983,8 @@ class TaskApp:
                 break
         if existing:
             sid = existing["id"]
+            if not self.db.get_ai_messages(sid):
+                self._seed_roleplay_greeting(card_id, sid)
             state = self.db.role_card_state(card_id)
             state_changed = (
                 (relation and state.get("身份") != relation)
@@ -1009,6 +1016,7 @@ class TaskApp:
             sid = self.db.create_ai_session(
                 "roleplay", f"角色扮演 · {card['name']}", role_card_id=card_id
             )
+            self._seed_roleplay_greeting(card_id, sid)
             if relation or affection:
                 self._apply_role_initial(
                     card_id, sid, relation, affection, pop_dialog=False
@@ -1017,6 +1025,14 @@ class TaskApp:
         self._ai_session_id = sid
         self._ai_center = False
         self._render()
+
+    def _seed_roleplay_greeting(self, card_id, session_id):
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        greeting = role_greeting(card["content"])
+        if greeting and not self.db.get_ai_messages(session_id):
+            self.db.append_ai_message(session_id, "assistant", greeting)
 
     def _apply_role_initial(self, card_id, sid, relation, affection, pop_dialog=True):
         if pop_dialog:
@@ -1072,6 +1088,7 @@ class TaskApp:
                     if any(k in card_data for k in
                            ("description", "personality", "scenario",
                             "first_mes", "mes_example", "人设", "性格",
+                            "alternate_greetings", "creator_notes",
                             "system_prompt", "post_history_instructions",
                             "character_book")):
                         content = tavern_to_role_card(card_data)

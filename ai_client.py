@@ -176,7 +176,8 @@ def extract_tasks(text: str):
 # ---------------------------------------------------------------------------
 # 角色卡解析 / 动态状态 / 按需加载
 # ---------------------------------------------------------------------------
-ROLE_SECTIONS = ["核心", "背景", "爱好", "说话风格", "关系", "扩展",
+ROLE_SECTIONS = ["核心", "背景", "爱好", "说话风格", "关系",
+                 "开场白", "示例对话", "替代开场", "作者备注", "扩展",
                  "记忆", "当前情绪", "好感度",
                  "系统提示", "历史后置指令", "世界书"]
 
@@ -194,6 +195,31 @@ def parse_role_card(content: str) -> dict:
         if current:
             sections[current].append(raw)
     return {k: "\n".join(v).strip() for k, v in sections.items() if v}
+
+
+def role_greeting(card_content: str) -> str:
+    """从酒馆角色卡字段中取出开场白。"""
+    sections = parse_role_card(card_content)
+    first = sections.get("开场白", "").strip()
+    if first:
+        return first
+    raw_alt = sections.get("替代开场", "").strip()
+    if raw_alt:
+        if raw_alt.startswith("列表："):
+            raw_alt = raw_alt[len("列表："):].strip()
+        try:
+            items = json.loads(raw_alt)
+            if isinstance(items, list):
+                choices = [str(x).strip() for x in items if str(x).strip()]
+                if choices:
+                    return random.choice(choices)
+        except (TypeError, ValueError):
+            pass
+    for line in sections.get("扩展", "").splitlines():
+        line = line.strip()
+        if line.startswith("开场白："):
+            return line[len("开场白："):].strip()
+    return ""
 
 
 def parse_state_block(text: str):
@@ -423,8 +449,18 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
         lines = group_memory.splitlines()[-6:]
         parts.append("[群聊记忆]\n" + "\n".join(lines))
 
+    example = sections.get("示例对话", "")
+    if not example:
+        for line in sections.get("扩展", "").splitlines():
+            line = line.strip()
+            if line.startswith("示例对话："):
+                example = line[len("示例对话："):].strip()
+                break
+    if example:
+        parts.append("[示例对话]\n" + example)
+
     # 其他静态段：未加载时给摘要，已加载时给全文
-    for section in ("背景", "爱好", "说话风格", "关系", "扩展"):
+    for section in ("背景", "爱好", "说话风格", "关系", "作者备注", "扩展"):
         content = sections.get(section, "")
         if not content:
             continue
@@ -526,6 +562,10 @@ def tavern_to_role_card(data: dict) -> str:
     scenario = str(data.get("scenario") or data.get("背景") or "")
     first_mes = str(data.get("first_mes") or data.get("开场白") or "")
     mes_example = str(data.get("mes_example") or data.get("示例对话") or "")
+    creator_notes = str(data.get("creator_notes") or data.get("作者备注") or "")
+    alternate_greetings = (
+        data.get("alternate_greetings") or data.get("替代开场") or []
+    )
     system_prompt = str(data.get("system_prompt") or data.get("系统提示") or "")
     post_history = str(
         data.get("post_history_instructions") or data.get("历史后置指令") or ""
@@ -544,12 +584,24 @@ def tavern_to_role_card(data: dict) -> str:
         lines += ["", "[爱好]", hobbies]
     if scenario:
         lines += ["", "[背景]", scenario]
-    if first_mes or mes_example:
-        lines += ["", "[扩展]"]
-        if first_mes:
-            lines.append(f"开场白：{first_mes}")
-        if mes_example:
-            lines.append(f"示例对话：{mes_example}")
+    if first_mes:
+        lines += ["", "[开场白]", first_mes]
+    if mes_example:
+        lines += ["", "[示例对话]", mes_example]
+    if alternate_greetings:
+        if isinstance(alternate_greetings, str):
+            alternate_greetings = [alternate_greetings]
+        items = [str(x).strip() for x in alternate_greetings if str(x).strip()]
+        if items:
+            lines += [
+                "", "[替代开场]",
+                "列表：" + json.dumps(items, ensure_ascii=False),
+            ]
+    if creator_notes:
+        lines += ["", "[作者备注]", creator_notes]
+    extra = str(data.get("扩展") or data.get("extensions") or "")
+    if extra:
+        lines += ["", "[扩展]", extra]
     if system_prompt:
         lines += ["", "[系统提示]", system_prompt]
     if post_history:

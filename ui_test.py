@@ -673,6 +673,10 @@ def main():
         "data": {
             "name": "V2角色",
             "description": "测试",
+            "first_mes": "你来了？这家店今晚只为你开门。",
+            "mes_example": "用户：你这里有什么书？\n角色：想找什么，我帮你翻。",
+            "alternate_greetings": ["雨夜好，先进来避雨吧。", "今晚只有我在这里。"],
+            "creator_notes": "语气克制，动作少，话里带着一点旧书店的气味。",
             "system_prompt": "你是旧书店老板，绝不主动提起未来。",
             "post_history_instructions": "回复前先想角色当下的动作。",
             "character_book": {
@@ -686,6 +690,11 @@ def main():
         },
     })
     assert "V2角色" in card_v2
+    parsed_v2 = ai_client.parse_role_card(card_v2)
+    assert parsed_v2["开场白"] == "你来了？这家店今晚只为你开门。"
+    assert "你这里有什么书" in parsed_v2["示例对话"]
+    assert "雨夜好" in parsed_v2["替代开场"]
+    assert "旧书店的气味" in parsed_v2["作者备注"]
     assert "旧书店老板" in card_v2
     assert "回复前先想角色当下的动作" in card_v2
     assert "暗门" in card_v2
@@ -693,6 +702,7 @@ def main():
     assert world_entries[0]["keys"] == ["旧书店", "雨夜"]
     assert ai_client.match_world_book(card_v2, "你记得那间旧书店吗？") == ["世界书"]
     assert ai_client.post_history_instructions(card_v2) == "回复前先想角色当下的动作。"
+    assert ai_client.role_greeting(card_v2) == "你来了？这家店今晚只为你开门。"
 
     role_system = ai_client.build_role_system(
         "[核心]\n名字：测试角色", {}
@@ -715,8 +725,19 @@ def main():
     assert "优先级最高" in role_system_v2
     assert "旧书店老板" in role_system_v2
     assert "世界书" in role_system_v2
+    assert "示例对话" in role_system_v2
+    assert "你这里有什么书" in role_system_v2
     role_system_v2_loaded = ai_client.build_role_system(card_v2, {}, loaded={"世界书"})
     assert "暗门" in role_system_v2_loaded
+
+    greet_card_id = db.create_role_card("开场角色", card_v2)
+    app._begin_roleplay(greet_card_id)
+    greet_sid = app._ai_session_id
+    greet_msgs = db.get_ai_messages(greet_sid)
+    assert greet_msgs[0]["role"] == "assistant"
+    assert greet_msgs[0]["content"] == "你来了？这家店今晚只为你开门。"
+    app._begin_roleplay(greet_card_id)
+    assert len(db.get_ai_messages(greet_sid)) == 1
 
     print("UI TEST OK")
 
