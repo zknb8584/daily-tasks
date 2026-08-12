@@ -615,7 +615,11 @@ def main():
         }, f, ensure_ascii=False)
     app.file_picker = FakePicker(files=[types.SimpleNamespace(path=v2_file, bytes=None)])
     asyncio.run(app._import_role_card(None))
-    app._create_imported_role_card(types.SimpleNamespace(value=""), None)
+    app._create_imported_role_card(
+        types.SimpleNamespace(value="ai"),
+        types.SimpleNamespace(value=""),
+        None,
+    )
     imported = [c for c in db.list_role_cards() if c["name"] == "V2导入"]
     assert len(imported) == 1
     assert "旧书店老板" in imported[0]["content"]

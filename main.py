@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.3"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.4"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -768,6 +768,13 @@ class TaskApp:
                     content="新建用户人设",
                     icon=ft.Icons.PERSON_ADD,
                     on_click=lambda e: self._open_user_card_editor(None),
+                ))
+                controls.append(ft.TextButton(
+                    content="导入用户人设",
+                    icon=ft.Icons.UPLOAD_FILE,
+                    on_click=lambda e: self.page.run_task(
+                        self._import_role_card, None
+                    ),
                 ))
         return controls
 
@@ -2000,6 +2007,14 @@ class TaskApp:
         if dlg is not None:
             self.page.pop_dialog()
         worlds = self.db.list_worlds()
+        card_type_dd = ft.Dropdown(
+            label="导入为",
+            value="ai",
+            options=[
+                ft.dropdown.Option(key="ai", text="AI 角色卡"),
+                ft.dropdown.Option(key="user", text="我的人设卡"),
+            ],
+        )
         world_dd = ft.Dropdown(
             label="选择世界观",
             value="",
@@ -2113,6 +2128,7 @@ class TaskApp:
                 [
                     ft.Text(f"已解析角色：{name}", size=13,
                             color=ft.Colors.BLUE_GREY_600),
+                    card_type_dd,
                     world_dd,
                 ],
                 tight=True,
@@ -2126,7 +2142,7 @@ class TaskApp:
                 ft.FilledButton(
                     content="导入",
                     on_click=lambda e: self._create_imported_role_card(
-                        world_dd, dlg
+                        card_type_dd, world_dd, dlg
                     ),
                 ),
             ],
@@ -2139,18 +2155,25 @@ class TaskApp:
         self._pending_import = None
         self._return_to_roleplay_context()
 
-    def _create_imported_role_card(self, world_dd, dlg=None):
+    def _create_imported_role_card(self, card_type_dd, world_dd, dlg=None):
         if not self._pending_import:
             return
         name = self._pending_import["name"]
         content = self._pending_import["content"]
+        card_type = card_type_dd.value if card_type_dd is not None else "ai"
         world_id = int(world_dd.value) if world_dd and world_dd.value else None
-        content = self._attach_world_to_content(content, world_id)
-        self.db.create_role_card(name, content, world_id)
+        if card_type == "user":
+            self.db.create_user_card(name, content)
+        else:
+            content = self._attach_world_to_content(content, world_id)
+            self.db.create_role_card(name, content, world_id)
         self._pending_import = None
         if dlg is not None:
             self.page.pop_dialog()
-        self._toast(f"已导入角色卡：{name}")
+        self._toast(
+            f"已导入用户人设：{name}" if card_type == "user"
+            else f"已导入角色卡：{name}"
+        )
         self._return_to_roleplay_context()
 
     async def _do_generate_role_card(self, desc_field, status, gen_dlg=None):
