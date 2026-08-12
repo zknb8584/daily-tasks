@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.4"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.5"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -989,7 +989,19 @@ class TaskApp:
                 label = "亲密 / 依恋"
             affection_text.value = f"{value} · {label}"
 
-        type_dd.on_change = lambda e: (_load_pair(), self.page.update())
+        def _set_type(value):
+            type_dd.value = value
+            _load_pair()
+            self.page.update()
+
+        type_seg = ft.SegmentedButton(
+            selected=[type_dd.value],
+            segments=[
+                ft.Segment(value="user_ai", label=ft.Text("用户 ↔ AI")),
+                ft.Segment(value="ai_ai", label=ft.Text("AI ↔ AI")),
+            ],
+            on_change=lambda e: _set_type(list(e.control.selected)[0]),
+        )
         first_dd.on_change = lambda e: (_load_pair(), self.page.update())
         second_dd.on_change = lambda e: (_load_pair(), self.page.update())
         affection_slider.on_change = lambda e: (
@@ -1034,7 +1046,7 @@ class TaskApp:
             title=ft.Text("关系管理"),
             content=ft.Column(
                 [
-                    type_dd,
+                    type_seg,
                     first_dd,
                     second_dd,
                     relation_field,
@@ -4625,7 +4637,7 @@ class TaskApp:
         if self._swipe_blocked.get(key):
             return
         if self._swipe_armed.get(key):
-            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 2.0:
+            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 1.0:
                 return
             self._swipe_armed.pop(key, None)
             self._swipe_armed_at.pop(key, None)
