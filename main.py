@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.5"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.6"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -911,14 +911,7 @@ class TaskApp:
         if not role_cards:
             self._toast("请先创建 AI 角色卡")
             return
-        type_dd = ft.Dropdown(
-            label="关系类型",
-            value="user_ai",
-            options=[
-                ft.dropdown.Option(key="user_ai", text="用户人设 ↔ AI 角色"),
-                ft.dropdown.Option(key="ai_ai", text="AI 角色 ↔ AI 角色"),
-            ],
-        )
+        mode_value = ["user_ai"]
         first_dd = ft.Dropdown(label="卡 A", value="")
         second_dd = ft.Dropdown(
             label="卡 B",
@@ -939,7 +932,7 @@ class TaskApp:
         )
 
         def _refresh_first():
-            if type_dd.value == "user_ai":
+            if mode_value[0] == "user_ai":
                 options = [
                     ft.dropdown.Option(key=str(u["id"]), text=u["name"])
                     for u in user_cards
@@ -958,7 +951,7 @@ class TaskApp:
         def _load_pair():
             _refresh_first()
             pair = None
-            if type_dd.value == "user_ai":
+            if mode_value[0] == "user_ai":
                 user_id = int(first_dd.value) if first_dd.value else 0
                 pair = self.db.get_role_relation(user_id, second_dd.value)
             elif first_dd.value and second_dd.value:
@@ -990,12 +983,12 @@ class TaskApp:
             affection_text.value = f"{value} · {label}"
 
         def _set_type(value):
-            type_dd.value = value
+            mode_value[0] = value
             _load_pair()
             self.page.update()
 
         type_seg = ft.SegmentedButton(
-            selected=[type_dd.value],
+            selected=[mode_value[0]],
             segments=[
                 ft.Segment(value="user_ai", label=ft.Text("用户 ↔ AI")),
                 ft.Segment(value="ai_ai", label=ft.Text("AI ↔ AI")),
@@ -1011,7 +1004,7 @@ class TaskApp:
 
         def _save(e):
             role_b = int(second_dd.value)
-            if type_dd.value == "user_ai":
+            if mode_value[0] == "user_ai":
                 user_id = int(first_dd.value) if first_dd.value else None
                 self.db.save_role_relation(
                     user_id, role_b,
@@ -1030,7 +1023,7 @@ class TaskApp:
             self._render()
 
         def _delete_relation(e):
-            if type_dd.value == "user_ai":
+            if mode_value[0] == "user_ai":
                 user_id = int(first_dd.value) if first_dd.value else None
                 self.db.delete_role_relation(user_id, int(second_dd.value))
             elif first_dd.value and second_dd.value:
@@ -1353,7 +1346,7 @@ class TaskApp:
                     ),
                 ],
             ),
-            on_click=lambda e, cid=card["id"]: self._begin_roleplay(cid),
+            on_click=lambda e, cid=card["id"]: self._open_roleplay_start(cid),
             min_height=58,
         )
 
@@ -1846,12 +1839,21 @@ class TaskApp:
         return replies
 
     # ---------- 角色扮演：角色卡 ----------
-    def _choose_roleplay(self):
+    def _open_roleplay_start(self, card_id):
+        for sess in self.db.list_ai_sessions():
+            if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card_id:
+                pair = self.db.get_role_relation(sess.get("user_card_id"), card_id)
+                if pair:
+                    self._begin_roleplay(card_id)
+                    return
+        self._choose_roleplay(initial_card_id=card_id)
+
+    def _choose_roleplay(self, initial_card_id=None):
         cards = self.db.list_role_cards()
         dropdown = ft.Dropdown(
             label="选择角色卡",
             options=[ft.dropdown.Option(key=c["id"], text=c["name"]) for c in cards],
-            value=cards[0]["id"] if cards else None,
+            value=initial_card_id if initial_card_id else (cards[0]["id"] if cards else None),
         )
         card_menu = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT,
