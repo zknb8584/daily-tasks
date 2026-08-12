@@ -457,6 +457,11 @@ class Database:
     def roots(self):
         return self.children(None)
 
+    def all_items(self):
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM items ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
     def has_children(self, item_id) -> bool:
         with self._conn() as c:
             row = c.execute(

@@ -404,6 +404,8 @@ def main():
     texts = rendered_texts(app)
     assert any("AI 拷问拆解" in t for t in texts), texts
     assert any("AI 测试会话" in t for t in texts), texts
+    assert any("生成任务树" in t for t in texts), texts
+    assert any("角色扮演" in t for t in texts), texts
 
     app._open_ai_session(sid)
     texts = rendered_texts(app)
@@ -419,6 +421,13 @@ def main():
     before_subtree = len(db._subtree_ids(ai_root))
     app._apply_ai_tasks(sid, rows, ai_root)
     assert len(db._subtree_ids(ai_root)) == before_subtree + 3  # 根标题与项目同名，跳过
+    top_before = len(db.roots())
+    app._apply_ai_tasks(
+        sid,
+        ai_client.extract_tasks("---TASKS---\n新顶层\n  子任务"),
+        None,
+    )
+    assert len(db.roots()) == top_before + 1
 
     # ---- 滑动：子树快照删除 -> 撤销恢复 ----
     snap = db.snapshot_subtree(ai_root)
@@ -431,6 +440,22 @@ def main():
     # ---- 滑动：Dismissible 包装构造不崩 ----
     wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
     assert isinstance(wrapper, ft.Dismissible)
+    confirm_calls = []
+    class FakeDismissible:
+        async def confirm_dismiss(self, value):
+            confirm_calls.append(value)
+    app._swipe_armed = {}
+    fake_dir = ft.DismissDirection.END_TO_START
+    asyncio.run(app._on_confirm_dismiss(
+        types.SimpleNamespace(direction=fake_dir, control=FakeDismissible()),
+        1, False,
+    ))
+    assert app._swipe_armed[(1, str(fake_dir))] is True
+    asyncio.run(app._on_confirm_dismiss(
+        types.SimpleNamespace(direction=fake_dir, control=FakeDismissible()),
+        1, False,
+    ))
+    assert confirm_calls == [False, True]
 
     # ---- 预览按钮：最后一条无大纲时隐藏，有大纲时显示 ----
     db.append_ai_message(sid, "assistant", "好的，明白了。")

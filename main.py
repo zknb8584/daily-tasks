@@ -58,9 +58,15 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.4.1"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.5.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
+
+AI_CATEGORIES = [
+    ("生成任务树", ["grill_decompose", "quick_decompose"]),
+    ("回答与解惑", ["general_chat", "study_help"]),
+    ("角色扮演", ["roleplay", "role_grill"]),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,7 @@ class TaskApp:
         self._pending_import = None     # 等待绑定世界观的导入角色卡
         self._group_loaded_sections = {}  # 群聊里各角色已加载的角色卡段
         self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
+        self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
@@ -334,7 +341,18 @@ class TaskApp:
                 icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_ai_chat,
             )
             self.page.appbar.title = ft.Text(title)
-            self.page.appbar.actions = [self._settings_icon()]
+            actions = [self._settings_icon()]
+            if self._ai_session_id:
+                sess = self.db.get_ai_session(self._ai_session_id)
+                if sess and sess["skill_id"] == "roleplay" and sess.get("role_card_id"):
+                    card_id = sess["role_card_id"]
+                    actions.insert(0, ft.IconButton(
+                        icon=ft.Icons.INFO_OUTLINE,
+                        tooltip="角色详情",
+                        icon_color=ft.Colors.ON_PRIMARY,
+                        on_click=lambda e: self._open_role_details(card_id),
+                    ))
+            self.page.appbar.actions = actions
         elif ai_group:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
@@ -406,99 +424,185 @@ class TaskApp:
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Text(
-                    "选择技能开始新的对话，或继续之前的会话",
+                    "按用途进入对应板块，聊天记录也会按板块归类",
                     size=13, color=ft.Colors.BLUE_GREY_600,
                 ),
             )
         ]
-        for skill in AI_SKILLS:
-            controls.append(ft.ListTile(
-                leading=ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.BLUE_700),
-                title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
-                subtitle=ft.Text(skill["description"], size=12),
-                trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, color=ft.Colors.BLUE_700),
-                on_click=lambda e, sid=skill["id"]: (
-                    self._choose_roleplay() if sid == "roleplay"
-                    else self._start_ai_session(sid)
-                ),
-                min_height=64,
-            ))
-
-        controls.append(ft.Container(
-            margin=ft.Margin(top=16, left=12, right=12, bottom=4),
-            content=ft.Text("我的会话", size=13, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.BLUE_GREY_700),
-        ))
         sessions = self.db.list_ai_sessions()
-        if not sessions:
-            controls.append(self._hint_text("还没有 AI 会话"))
-        for sess in sessions:
-            skill = SKILL_BY_ID.get(sess["skill_id"])
-            skill_name = skill["name"] if skill else sess["skill_id"]
-            controls.append(ft.ListTile(
-                leading=ft.Icon(ft.Icons.FORUM, color=ft.Colors.BLUE_GREY_500),
-                title=ft.Text(sess["title"], max_lines=1,
-                              overflow=ft.TextOverflow.ELLIPSIS),
-                subtitle=ft.Text(f"{skill_name} · {sess['updated_at']}", size=11,
-                                 color=ft.Colors.BLUE_GREY_400),
-                trailing=ft.PopupMenuButton(
-                    icon=ft.Icons.MORE_VERT,
-                    icon_color=ft.Colors.BLUE_GREY_500,
-                    items=[
-                        ft.PopupMenuItem(
-                            content=ft.Text("继续"),
-                            on_click=lambda e, s=sess["id"]: self._open_ai_session(s),
-                        ),
-                        ft.PopupMenuItem(
-                            content=ft.Text("删除"),
-                            on_click=lambda e, s=sess["id"]: self._delete_ai_session(s),
-                        ),
-                    ],
-                ),
-                on_click=lambda e, s=sess["id"]: self._open_ai_session(s),
-                min_height=58,
-            ))
-
-        controls.append(ft.Container(
-            margin=ft.Margin(top=16, left=12, right=12, bottom=4),
-            content=ft.Text("我的群聊", size=13, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.BLUE_GREY_700),
-        ))
-        controls.append(ft.TextButton(
-            content="新建群聊",
-            icon=ft.Icons.GROUPS,
-            on_click=lambda e: self._open_group_creator(),
-        ))
         groups = self.db.list_group_chats()
-        if not groups:
-            controls.append(self._hint_text("还没有群聊"))
-        for g in groups:
-            controls.append(ft.ListTile(
-                leading=ft.Icon(ft.Icons.FORUM, color=ft.Colors.INDIGO_700),
-                title=ft.Text(g["title"], max_lines=1,
-                              overflow=ft.TextOverflow.ELLIPSIS),
-                subtitle=ft.Text(
-                    f"{g['member_count']} 个角色 · {g['updated_at']}",
-                    size=11, color=ft.Colors.BLUE_GREY_400,
-                ),
-                trailing=ft.PopupMenuButton(
-                    icon=ft.Icons.MORE_VERT,
-                    icon_color=ft.Colors.BLUE_GREY_500,
-                    items=[
-                        ft.PopupMenuItem(
-                            content=ft.Text("继续"),
-                            on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
-                        ),
-                        ft.PopupMenuItem(
-                            content=ft.Text("删除"),
-                            on_click=lambda e, gid=g["id"]: self._confirm_delete_group(gid),
-                        ),
-                    ],
-                ),
-                on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
-                min_height=58,
+        role_cards = self.db.list_role_cards()
+        for category, skill_ids in AI_CATEGORIES:
+            controls.append(ft.Container(
+                margin=ft.Margin(top=16, left=12, right=12, bottom=4),
+                content=ft.Text(category, size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_GREY_700),
             ))
+            for skill_id in skill_ids:
+                skill = SKILL_BY_ID.get(skill_id)
+                if not skill:
+                    continue
+                if skill_id == "roleplay":
+                    controls.append(ft.ListTile(
+                        leading=ft.Icon(ft.Icons.PERSON, color=ft.Colors.INDIGO_700),
+                        title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
+                        subtitle=ft.Text(skill["description"], size=12),
+                        trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE,
+                                         color=ft.Colors.INDIGO_700),
+                        on_click=lambda e: self._choose_roleplay(),
+                        min_height=64,
+                    ))
+                else:
+                    controls.append(ft.ListTile(
+                        leading=ft.Icon(ft.Icons.AUTO_AWESOME,
+                                        color=ft.Colors.BLUE_700),
+                        title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
+                        subtitle=ft.Text(skill["description"], size=12),
+                        trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE,
+                                         color=ft.Colors.BLUE_700),
+                        on_click=lambda e, sid=skill_id: (
+                            self._start_role_grill() if sid == "role_grill"
+                            else self._start_ai_session(sid)
+                        ),
+                        min_height=64,
+                    ))
+
+            if category == "角色扮演":
+                controls.append(ft.Container(
+                    margin=ft.Margin(top=12, left=12, right=12, bottom=2),
+                    content=ft.Text("角色聊天", size=12,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.BLUE_GREY_500),
+                ))
+                if not role_cards:
+                    controls.append(self._hint_text("还没有角色，先导入或生成一个"))
+                for card in role_cards:
+                    controls.append(self._role_chat_row(card))
+                controls.append(ft.TextButton(
+                    content="导入角色卡",
+                    icon=ft.Icons.UPLOAD_FILE,
+                    on_click=lambda e: self.page.run_task(self._import_role_card, None),
+                ))
+                controls.append(ft.TextButton(
+                    content="AI 生成角色卡",
+                    icon=ft.Icons.AUTO_AWESOME,
+                    on_click=lambda e: self._open_role_card_generator(None),
+                ))
+                controls.append(ft.TextButton(
+                    content="Grill-me 拷问生成",
+                    icon=ft.Icons.QUESTION_ANSWER,
+                    on_click=lambda e: self._start_role_grill(None),
+                ))
+                controls.append(ft.Container(
+                    margin=ft.Margin(top=12, left=12, right=12, bottom=2),
+                    content=ft.Text("我的群聊", size=12,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.BLUE_GREY_500),
+                ))
+                controls.append(ft.TextButton(
+                    content="新建群聊",
+                    icon=ft.Icons.GROUPS,
+                    on_click=lambda e: self._open_group_creator(),
+                ))
+                if not groups:
+                    controls.append(self._hint_text("还没有群聊"))
+                for g in groups:
+                    controls.append(self._group_chat_row(g))
+
+            cat_sessions = [
+                s for s in sessions if s["skill_id"] in skill_ids
+            ]
+            if cat_sessions:
+                controls.append(ft.Container(
+                    margin=ft.Margin(top=12, left=12, right=12, bottom=2),
+                    content=ft.Text(f"{category}记录", size=12,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.BLUE_GREY_500),
+                ))
+                for sess in cat_sessions:
+                    controls.append(self._session_chat_row(sess))
         return controls
+
+    def _session_chat_row(self, sess):
+        skill = SKILL_BY_ID.get(sess["skill_id"])
+        skill_name = skill["name"] if skill else sess["skill_id"]
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.FORUM, color=ft.Colors.BLUE_GREY_500),
+            title=ft.Text(sess["title"], max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(f"{skill_name} · {sess['updated_at']}", size=11,
+                             color=ft.Colors.BLUE_GREY_400),
+            trailing=ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                icon_color=ft.Colors.BLUE_GREY_500,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("继续"),
+                        on_click=lambda e, s=sess["id"]: self._open_ai_session(s),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("删除"),
+                        on_click=lambda e, s=sess["id"]: self._delete_ai_session(s),
+                    ),
+                ],
+            ),
+            on_click=lambda e, s=sess["id"]: self._open_ai_session(s),
+            min_height=58,
+        )
+
+    def _group_chat_row(self, g):
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.FORUM, color=ft.Colors.INDIGO_700),
+            title=ft.Text(g["title"], max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(
+                f"{g['member_count']} 个角色 · {g['updated_at']}",
+                size=11, color=ft.Colors.BLUE_GREY_400,
+            ),
+            trailing=ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                icon_color=ft.Colors.BLUE_GREY_500,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("继续"),
+                        on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("删除"),
+                        on_click=lambda e, gid=g["id"]: self._confirm_delete_group(gid),
+                    ),
+                ],
+            ),
+            on_click=lambda e, gid=g["id"]: self._open_group_chat(gid),
+            min_height=58,
+        )
+
+    def _role_chat_row(self, card):
+        world = self.db.get_world(card.get("world_id")) if card.get("world_id") else None
+        subtitle = world["name"] if world else "未绑定世界观"
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.PERSON, color=ft.Colors.INDIGO_700),
+            title=ft.Text(card["name"], max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(subtitle, size=11,
+                             color=ft.Colors.BLUE_GREY_400),
+            trailing=ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                icon_color=ft.Colors.BLUE_GREY_500,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("查看详情"),
+                        on_click=lambda e, cid=card["id"]: self._open_role_details(cid),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("删除"),
+                        on_click=lambda e, cid=card["id"]: self._confirm_delete_role_card(cid),
+                    ),
+                ],
+            ),
+            on_click=lambda e, cid=card["id"]: self._begin_roleplay(cid),
+            min_height=58,
+        )
 
     def _delete_ai_session(self, session_id):
         self.db.delete_ai_session(session_id)
@@ -1000,7 +1104,8 @@ class TaskApp:
 
     def _cancel_role_grill_start(self):
         self.page.pop_dialog()
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     def _begin_role_grill(self, world_dd, new_world_field, dlg):
         world_id = int(world_dd.value) if world_dd and world_dd.value else None
@@ -1091,7 +1196,8 @@ class TaskApp:
     def _cancel_import_world(self):
         self.page.pop_dialog()
         self._pending_import = None
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     def _create_imported_role_card(self, world_dd, dlg=None):
         if not self._pending_import:
@@ -1105,7 +1211,8 @@ class TaskApp:
         if dlg is not None:
             self.page.pop_dialog()
         self._toast(f"已导入角色卡：{name}")
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     async def _do_generate_role_card(self, desc_field, status, gen_dlg=None):
         desc = (desc_field.value or "").strip()
@@ -1155,7 +1262,8 @@ class TaskApp:
             self._toast(f"已生成角色卡：{name}")
             if gen_dlg is not None:
                 self.page.pop_dialog()
-            self._choose_roleplay()
+            self._ai_center = True
+            self._render()
         except Exception as ex:
             status.value = f"生成失败：{ex}"
             self.page.update()
@@ -1187,14 +1295,64 @@ class TaskApp:
         )
         self.page.show_dialog(confirm)
 
-    def _do_delete_role_card(self, card_id):
+    def _do_delete_role_card(self, card_id, reopen_choose=True):
         self.page.pop_dialog()
         for sess in self.db.list_ai_sessions():
             if sess.get("role_card_id") == card_id:
                 self.db.delete_ai_session(sess["id"])
         self.db.delete_role_card(card_id)
         self._toast("角色卡已删除")
-        self._choose_roleplay()
+        if reopen_choose:
+            pass
+        self._ai_center = True
+        self._render()
+
+    def _confirm_delete_role_card(self, card_id):
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("删除角色卡"),
+            content=ft.Text(f"将删除「{card['name']}」及其全部聊天记录，确定？"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="删除",
+                    on_click=lambda e: self._do_delete_role_card(
+                        card_id, reopen_choose=False
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _open_role_details(self, card_id):
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        world = self.db.get_world(card.get("world_id")) if card.get("world_id") else None
+        state = self.db.role_card_state(card_id)
+        parts = [
+            f"名字：{card['name']}",
+            f"世界观：{world['name'] if world else '未绑定'}",
+            f"身份：{state.get('身份', '未设定')}",
+            f"好感度：{state.get('好感度', '未建立')}",
+            f"情绪：{state.get('当前情绪', '平静')}",
+            "",
+            card["content"],
+        ]
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("角色详情"),
+            content=ft.Text("\n".join(parts), size=13, selectable=True),
+            actions=[
+                ft.TextButton("关闭", on_click=lambda e: self.page.pop_dialog()),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
 
     def _edit_selected_role_card(self, dropdown, dlg):
         card_id = dropdown.value if dropdown is not None else None
@@ -1250,7 +1408,8 @@ class TaskApp:
 
     def _cancel_role_card_editor(self):
         self.page.pop_dialog()
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     def _save_role_card_edit(self, card_id, name_field, content_field,
                              world_dd, dlg):
@@ -1266,7 +1425,8 @@ class TaskApp:
         )
         self.page.pop_dialog()
         self._toast("角色卡已保存")
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     def _open_world_manager(self, dlg=None):
         if dlg is not None:
@@ -1328,7 +1488,8 @@ class TaskApp:
 
     def _close_world_manager(self):
         self.page.pop_dialog()
-        self._choose_roleplay()
+        self._ai_center = True
+        self._render()
 
     def _open_world_editor(self, world_id):
         self.page.pop_dialog()
@@ -2218,16 +2379,11 @@ class TaskApp:
         self._ai_center = True
         self._toast(f"已生成角色卡：{name}")
         self._render()
-        self._choose_roleplay()
 
     # ---------- AI 任务树落库 ----------
     def _preview_ai_tasks(self, session_id):
         sess = self.db.get_ai_session(session_id)
         if not sess or sess["skill_id"] not in ("grill_decompose", "quick_decompose"):
-            return
-        pid = sess.get("project_id")
-        if not pid or not self.db.get(pid):
-            self._toast("这个会话没有关联项目")
             return
         last = self.db.get_ai_messages(session_id)
         assistant = [m for m in last if m["role"] == "assistant"]
@@ -2239,13 +2395,28 @@ class TaskApp:
             self._toast("AI 回复里没有可解析的任务大纲")
             return
         preview = "\n".join("  " * lvl + title for lvl, title in rows)
+        project_dd = ft.Dropdown(
+            label="挂载到哪个项目",
+            value="",
+            options=[
+                ft.dropdown.Option(key="", text="作为新的顶层项目"),
+                *[
+                    ft.dropdown.Option(
+                        key=str(it["id"]),
+                        text=self.db.title_path(it["id"]),
+                    )
+                    for it in self.db.all_items()
+                ],
+            ],
+        )
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("确认生成任务树"),
             content=ft.Column(
                 [
-                    ft.Text("将追加到项目下方，不覆盖现有子任务：", size=12,
+                    ft.Text("选择挂载位置，AI 任务会追加到目标项目下方：", size=12,
                             color=ft.Colors.BLUE_GREY_600),
+                    project_dd,
                     ft.Container(
                         padding=ft.Padding(left=10, right=10, top=8, bottom=8),
                         bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.LIGHT_BLUE_300),
@@ -2260,7 +2431,11 @@ class TaskApp:
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton(
                     content="确认追加",
-                    on_click=lambda e, s=session_id, r=rows, p=pid: self._apply_ai_tasks(s, r, p),
+                    on_click=lambda e, s=session_id, r=rows, dd=project_dd: (
+                        self._apply_ai_tasks(
+                            s, r, int(dd.value) if dd.value else None
+                        )
+                    ),
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -2269,11 +2444,9 @@ class TaskApp:
 
     def _apply_ai_tasks(self, session_id, rows, project_id):
         self.page.pop_dialog()
-        project = self.db.get(project_id)
-        if not project:
-            return
+        project = self.db.get(project_id) if project_id else None
         # AI 大纲第一行往往是项目名本身；与项目标题一致时跳过，避免重复。
-        if rows and rows[0][0] == 0 and rows[0][1].strip() == project["title"].strip():
+        if project and rows and rows[0][0] == 0 and rows[0][1].strip() == project["title"].strip():
             rows = rows[1:]
         stack = [(0, project_id)]
         added = 0
@@ -2910,8 +3083,29 @@ class TaskApp:
                     spacing=6,
                 ),
             ),
+            on_confirm_dismiss=lambda e, i=item_id, d=done: self._on_confirm_dismiss(
+                e, i, d
+            ),
             on_dismiss=lambda e, i=item_id, d=done: self._on_dismiss(e, i, d),
         )
+
+    async def _on_confirm_dismiss(self, e, item_id, done):
+        direction = getattr(e, "direction", None)
+        key = (item_id, str(direction))
+        if self._swipe_armed.get(key):
+            self._swipe_armed.pop(key, None)
+            await e.control.confirm_dismiss(True)
+            return
+        for old_key in list(self._swipe_armed):
+            if old_key[0] == item_id:
+                self._swipe_armed.pop(old_key, None)
+        self._swipe_armed[key] = True
+        if direction == ft.DismissDirection.END_TO_START:
+            label = "删除"
+        else:
+            label = "恢复" if done else "完成"
+        self._toast(f"已显示操作，再滑动一次确认{label}")
+        await e.control.confirm_dismiss(False)
 
     def _on_dismiss(self, e, item_id, done):
         direction = getattr(e, "direction", None)
