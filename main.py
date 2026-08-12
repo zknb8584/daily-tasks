@@ -37,6 +37,7 @@ from ai_client import (
     GRILL_PROGRESS_ITEMS,
     SKILL_BY_ID,
     build_group_role_system,
+    build_autonomy_rule,
     build_role_system,
     chat_completion,
     extract_bracket_directives,
@@ -59,7 +60,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.6.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.7.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -176,6 +177,8 @@ class TaskApp:
         self._selected_day = today      # 日历选中的日期
         self._ai_center = False         # 是否在 AI 中心
         self._ai_category = None        # AI 中心当前选中的板块名
+        self._roleplay_view = None      # 角色扮演：home/chat/cards
+        self._roleplay_card_view = "ai" # 角色卡页：ai/user
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
@@ -188,6 +191,7 @@ class TaskApp:
         self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动
         self._swipe_armed_at = {}       # 两段式滑动：第一次滑动的触发时间
         self._swipe_blocked = {}        # 反向拖动取消后，本次手势不再自动换操作
+        self._suggestion_options = {}   # 角色扮演会话的建议回复
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
@@ -353,6 +357,17 @@ class TaskApp:
                 sess = self.db.get_ai_session(self._ai_session_id)
                 if sess and sess["skill_id"] == "roleplay" and sess.get("role_card_id"):
                     card_id = sess["role_card_id"]
+                    meta = self.db.get_ai_session_meta(sess["id"])
+                    suggestion_on = bool(meta.get("suggestion_mode"))
+                    actions.insert(0, ft.IconButton(
+                        icon=ft.Icons.FORMAT_LIST_BULLETED,
+                        tooltip="建议模式",
+                        icon_color=(
+                            ft.Colors.AMBER_400
+                            if suggestion_on else ft.Colors.ON_PRIMARY
+                        ),
+                        on_click=lambda e: self._toggle_suggestion_mode(),
+                    ))
                     actions.insert(0, ft.IconButton(
                         icon=ft.Icons.INFO_OUTLINE,
                         tooltip="角色详情",
@@ -430,17 +445,371 @@ class TaskApp:
 
     def _select_ai_category(self, category):
         self._ai_category = category
+        self._roleplay_view = None
         self._render()
 
     def _close_ai_category(self, e=None):
         self._ai_category = None
+        self._roleplay_view = None
         self._render()
 
     def _close_ai_center_or_category(self, e=None):
+        if self._ai_category == "角色扮演" and self._roleplay_view:
+            self._roleplay_view = None
+            self._render()
+            return
         if self._ai_category:
             self._close_ai_category()
         else:
             self._close_ai_center()
+
+    def _open_roleplay_chat(self, e=None):
+        self._roleplay_view = "chat"
+        self._render()
+
+    def _open_roleplay_cards(self, e=None):
+        self._roleplay_view = "cards"
+        self._render()
+
+    def _close_roleplay_view(self, e=None):
+        self._roleplay_view = None
+        self._render()
+
+    def _return_to_roleplay_context(self):
+        self._ai_center = True
+        if self._ai_category == "角色扮演" and self._roleplay_view is None:
+            self._roleplay_view = "cards"
+        self._render()
+
+    def _set_roleplay_card_view(self, view):
+        self._roleplay_card_view = view
+        self._render()
+
+    def _render_roleplay_home(self):
+        return [
+            ft.Container(
+                margin=ft.Margin(top=12, left=12, right=12, bottom=4),
+                content=ft.Text("角色扮演", size=18,
+                                weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_GREY_800),
+            ),
+            ft.ListTile(
+                leading=ft.Icon(ft.Icons.CHAT, color=ft.Colors.BLUE_700),
+                title=ft.Text("聊天", size=17, weight=ft.FontWeight.W_600),
+                subtitle=ft.Text("角色私聊 / 群聊", size=12,
+                                 color=ft.Colors.BLUE_GREY_500),
+                trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT,
+                                 color=ft.Colors.BLUE_GREY_400),
+                on_click=self._open_roleplay_chat,
+                min_height=76,
+            ),
+            ft.ListTile(
+                leading=ft.Icon(ft.Icons.BADGE, color=ft.Colors.INDIGO_700),
+                title=ft.Text("角色卡", size=17, weight=ft.FontWeight.W_600),
+                subtitle=ft.Text("AI角色卡 / 用户人设卡 / 关系 / 世界观",
+                                 size=12, color=ft.Colors.BLUE_GREY_500),
+                trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT,
+                                 color=ft.Colors.BLUE_GREY_400),
+                on_click=self._open_roleplay_cards,
+                min_height=76,
+            ),
+        ]
+
+    def _render_roleplay_chat_page(self):
+        role_cards = self.db.list_role_cards()
+        groups = self.db.list_group_chats()
+        controls = [
+            ft.Container(
+                margin=ft.Margin(top=8, left=12, right=12, bottom=4),
+                content=ft.Text("角色", size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_GREY_700),
+            )
+        ]
+        if not role_cards:
+            controls.append(self._hint_text("还没有角色，请先创建或导入角色卡"))
+        for card in role_cards:
+            controls.append(self._role_chat_row(card))
+        controls.append(ft.Container(
+            margin=ft.Margin(top=16, left=12, right=12, bottom=4),
+            content=ft.Text("群聊", size=13, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_GREY_700),
+        ))
+        controls.append(ft.TextButton(
+            content="新建群聊",
+            icon=ft.Icons.GROUPS,
+            on_click=lambda e: self._open_group_creator(),
+        ))
+        if not groups:
+            controls.append(self._hint_text("还没有群聊"))
+        for g in groups:
+            controls.append(self._group_chat_row(g))
+        return controls
+
+    def _render_roleplay_cards_page(self):
+        controls = [
+            ft.Container(
+                margin=ft.Margin(top=8, left=12, right=12, bottom=4),
+                content=ft.Row(
+                    [
+                        ft.Text("角色卡", size=17, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.BLUE_GREY_800),
+                        ft.Container(expand=True),
+                        ft.IconButton(
+                            icon=ft.Icons.HUB,
+                            tooltip="关系",
+                            on_click=lambda e: self._open_relation_manager(),
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.PUBLIC,
+                            tooltip="世界观",
+                            on_click=lambda e: self._open_world_manager(None),
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ),
+            ft.SegmentedButton(
+                selected={"ai"} if self._roleplay_card_view == "ai" else {"user"},
+                segments=[
+                    ft.Segment(value="ai", label=ft.Text("AI 角色卡")),
+                    ft.Segment(value="user", label=ft.Text("我的角色卡")),
+                ],
+                on_change=lambda e: self._set_roleplay_card_view(
+                    list(e.control.selected)[0]
+                ),
+            ),
+        ]
+        if self._roleplay_card_view == "ai":
+            cards = self.db.list_role_cards()
+            if not cards:
+                controls.append(self._hint_text("还没有 AI 角色卡"))
+            for card in cards:
+                controls.append(self._role_manage_row(card))
+            controls.append(ft.TextButton(
+                content="导入角色卡",
+                icon=ft.Icons.UPLOAD_FILE,
+                on_click=lambda e: self.page.run_task(self._import_role_card, None),
+            ))
+            controls.append(ft.TextButton(
+                content="AI 生成角色卡",
+                icon=ft.Icons.AUTO_AWESOME,
+                on_click=lambda e: self._open_role_card_generator(None),
+            ))
+            controls.append(ft.TextButton(
+                content="Grill-me 拷问生成",
+                icon=ft.Icons.QUESTION_ANSWER,
+                on_click=lambda e: self._start_role_grill(None),
+            ))
+        else:
+            user_cards = self.db.list_user_cards()
+            if not user_cards:
+                controls.append(self._hint_text("还没有用户人设卡"))
+            for uc in user_cards:
+                controls.append(self._user_manage_row(uc))
+            controls.append(ft.TextButton(
+                content="新建用户人设",
+                icon=ft.Icons.PERSON_ADD,
+                on_click=lambda e: self._open_user_card_editor(None),
+            ))
+        return controls
+
+    def _role_manage_row(self, card):
+        world = self.db.get_world(card.get("world_id")) if card.get("world_id") else None
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.PERSON, color=ft.Colors.INDIGO_700),
+            title=ft.Text(card["name"], max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(
+                world["name"] if world else "未绑定世界观",
+                size=11, color=ft.Colors.BLUE_GREY_400,
+            ),
+            trailing=ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("编辑角色卡"),
+                        on_click=lambda e, cid=card["id"]: self._open_role_card_edit(
+                            cid
+                        ),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("查看详情"),
+                        on_click=lambda e, cid=card["id"]: self._open_role_details(cid),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("删除"),
+                        on_click=lambda e, cid=card["id"]: self._confirm_delete_role_card(cid),
+                    ),
+                ],
+            ),
+            on_click=lambda e, cid=card["id"]: self._open_role_details(cid),
+            min_height=58,
+        )
+
+    def _user_manage_row(self, uc):
+        return ft.ListTile(
+            leading=ft.Icon(ft.Icons.BADGE, color=ft.Colors.TEAL_700),
+            title=ft.Text(uc["name"], max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text("用户人设卡", size=11,
+                             color=ft.Colors.BLUE_GREY_400),
+            trailing=ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("编辑人设"),
+                        on_click=lambda e, uid=uc["id"]: self._open_user_card_editor(uid),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("删除"),
+                        on_click=lambda e, uid=uc["id"]: self._delete_user_card(uid),
+                    ),
+                ],
+            ),
+            on_click=lambda e, uid=uc["id"]: self._open_user_card_editor(uid),
+            min_height=58,
+        )
+
+    def _open_role_card_edit(self, card_id):
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        self._show_role_card_editor(card)
+
+    def _open_relation_manager(self):
+        role_cards = self.db.list_role_cards()
+        user_cards = self.db.list_user_cards()
+        if not role_cards:
+            self._toast("请先创建 AI 角色卡")
+            return
+        type_dd = ft.Dropdown(
+            label="关系类型",
+            value="user_ai",
+            options=[
+                ft.dropdown.Option(key="user_ai", text="用户人设 ↔ AI 角色"),
+                ft.dropdown.Option(key="ai_ai", text="AI 角色 ↔ AI 角色"),
+            ],
+        )
+        first_dd = ft.Dropdown(label="卡 A", value="")
+        second_dd = ft.Dropdown(
+            label="卡 B",
+            value=str(role_cards[0]["id"]),
+            options=[
+                ft.dropdown.Option(key=str(r["id"]), text=r["name"])
+                for r in role_cards
+            ],
+        )
+        relation_field = ft.TextField(
+            label="身份关系",
+            hint_text="例如：青梅竹马、敌对旧识、同门师姐弟",
+        )
+        affection_text = ft.Text("50 · 友好", size=13,
+                                 color=ft.Colors.BLUE_700)
+        affection_slider = ft.Slider(
+            min=0, max=200, divisions=20, value=50, label="50"
+        )
+
+        def _refresh_first():
+            if type_dd.value == "user_ai":
+                options = [
+                    ft.dropdown.Option(key=str(u["id"]), text=u["name"])
+                    for u in user_cards
+                ]
+                first_dd.label = "我的人设卡"
+                first_dd.value = str(user_cards[0]["id"]) if user_cards else ""
+            else:
+                options = [
+                    ft.dropdown.Option(key=str(r["id"]), text=r["name"])
+                    for r in role_cards
+                ]
+                first_dd.label = "AI 角色卡 A"
+                first_dd.value = str(role_cards[0]["id"]) if role_cards else ""
+            first_dd.options = options
+
+        def _load_pair():
+            _refresh_first()
+            pair = None
+            if type_dd.value == "user_ai":
+                user_id = int(first_dd.value) if first_dd.value else 0
+                pair = self.db.get_role_relation(user_id, second_dd.value)
+            elif first_dd.value and second_dd.value:
+                pair = self.db.get_character_relation(
+                    int(first_dd.value), int(second_dd.value)
+                )
+            if pair:
+                relation_field.value = pair.get("relation") or ""
+                affection_slider.value = int(pair.get("affection") or 50)
+            else:
+                relation_field.value = ""
+                affection_slider.value = 50
+            _update_affection_label()
+
+        def _update_affection_label():
+            value = int(affection_slider.value or 50)
+            if value <= 20:
+                label = "陌生 / 疏远"
+            elif value <= 50:
+                label = "中立 / 普通认识"
+            elif value <= 80:
+                label = "友好"
+            elif value <= 120:
+                label = "亲近"
+            elif value <= 160:
+                label = "信赖"
+            else:
+                label = "亲密 / 依恋"
+            affection_text.value = f"{value} · {label}"
+
+        type_dd.on_change = lambda e: (_load_pair(), self.page.update())
+        first_dd.on_change = lambda e: (_load_pair(), self.page.update())
+        second_dd.on_change = lambda e: (_load_pair(), self.page.update())
+        affection_slider.on_change = lambda e: (
+            _update_affection_label(), self.page.update()
+        )
+        _refresh_first()
+
+        def _save(e):
+            role_b = int(second_dd.value)
+            if type_dd.value == "user_ai":
+                user_id = int(first_dd.value) if first_dd.value else None
+                self.db.save_role_relation(
+                    user_id, role_b,
+                    relation_field.value or "",
+                    str(int(affection_slider.value or 50)),
+                )
+            else:
+                role_a = int(first_dd.value)
+                self.db.save_character_relation(
+                    role_a, role_b,
+                    relation_field.value or "",
+                    int(affection_slider.value or 50),
+                )
+            self.page.pop_dialog()
+            self._toast("关系已保存")
+            self._render()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("关系管理"),
+            content=ft.Column(
+                [
+                    type_dd,
+                    first_dd,
+                    second_dd,
+                    relation_field,
+                    affection_text,
+                    affection_slider,
+                ],
+                tight=True,
+                spacing=8,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(content="保存关系", on_click=_save),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
 
     def _render_ai_center(self):
         controls = [
@@ -477,6 +846,12 @@ class TaskApp:
                     min_height=72,
                 ))
             return controls
+        if self._ai_category == "角色扮演":
+            if self._roleplay_view == "chat":
+                return self._render_roleplay_chat_page()
+            if self._roleplay_view == "cards":
+                return self._render_roleplay_cards_page()
+            return self._render_roleplay_home()
         sessions = self.db.list_ai_sessions()
         groups = self.db.list_group_chats()
         role_cards = self.db.list_role_cards()
@@ -936,6 +1311,7 @@ class TaskApp:
                 system = build_group_role_system(
                     card["content"], state, loaded, members, context
                 )
+                system += "\n\n" + build_autonomy_rule(card.get("autonomy"))
                 if user_directives:
                     system += (
                         "\n\n[导演指令]\n"
@@ -1202,8 +1578,7 @@ class TaskApp:
 
     def _cancel_role_grill_start(self):
         self.page.pop_dialog()
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _begin_role_grill(self, world_dd, new_world_field, dlg):
         world_id = int(world_dd.value) if world_dd and world_dd.value else None
@@ -1294,8 +1669,7 @@ class TaskApp:
     def _cancel_import_world(self):
         self.page.pop_dialog()
         self._pending_import = None
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _create_imported_role_card(self, world_dd, dlg=None):
         if not self._pending_import:
@@ -1309,8 +1683,7 @@ class TaskApp:
         if dlg is not None:
             self.page.pop_dialog()
         self._toast(f"已导入角色卡：{name}")
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     async def _do_generate_role_card(self, desc_field, status, gen_dlg=None):
         desc = (desc_field.value or "").strip()
@@ -1360,8 +1733,7 @@ class TaskApp:
             self._toast(f"已生成角色卡：{name}")
             if gen_dlg is not None:
                 self.page.pop_dialog()
-            self._ai_center = True
-            self._render()
+            self._return_to_roleplay_context()
         except Exception as ex:
             status.value = f"生成失败：{ex}"
             self.page.update()
@@ -1402,8 +1774,7 @@ class TaskApp:
         self._toast("角色卡已删除")
         if reopen_choose:
             pass
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _confirm_delete_role_card(self, card_id):
         card = self.db.get_role_card(card_id)
@@ -1438,6 +1809,7 @@ class TaskApp:
             f"身份：{state.get('身份', '未设定')}",
             f"好感度：{state.get('好感度', '未建立')}",
             f"情绪：{state.get('当前情绪', '平静')}",
+            f"自主性：{card.get('autonomy', 50)}",
             "",
             card["content"],
         ]
@@ -1446,11 +1818,69 @@ class TaskApp:
             title=ft.Text("角色详情"),
             content=ft.Text("\n".join(parts), size=13, selectable=True),
             actions=[
+                ft.TextButton(
+                    "行为设置",
+                    on_click=lambda e: self._open_role_behavior_settings(card_id),
+                ),
                 ft.TextButton("关闭", on_click=lambda e: self.page.pop_dialog()),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(dlg)
+
+    def _open_role_behavior_settings(self, card_id):
+        self.page.pop_dialog()
+        card = self.db.get_role_card(card_id)
+        if not card:
+            return
+        slider = ft.Slider(
+            min=0, max=100, divisions=20,
+            value=int(card.get("autonomy") or 50),
+            label=str(int(card.get("autonomy") or 50)),
+        )
+        value_text = ft.Text(
+            f"{int(card.get('autonomy') or 50)} · 自主性",
+            size=13, color=ft.Colors.BLUE_700,
+        )
+
+        def _update(e):
+            value = int(slider.value or 50)
+            slider.label = str(value)
+            if value <= 30:
+                label = "低：倾向顺着用户"
+            elif value <= 70:
+                label = "中：有自己的观点"
+            else:
+                label = "高：敢于反驳和提出观点"
+            value_text.value = f"{value} · {label}"
+
+        slider.on_change = lambda e: (_update(e), self.page.update())
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("行为设置"),
+            content=ft.Column(
+                [value_text, slider],
+                tight=True,
+                spacing=8,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(
+                    content="保存",
+                    on_click=lambda e: self._save_role_behavior(
+                        card_id, slider
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _save_role_behavior(self, card_id, slider):
+        self.db.set_role_autonomy(card_id, int(slider.value or 50))
+        self.page.pop_dialog()
+        self._toast("行为设置已保存")
+        self._open_role_details(card_id)
 
     def _edit_selected_role_card(self, dropdown, dlg):
         card_id = dropdown.value if dropdown is not None else None
@@ -1462,6 +1892,10 @@ class TaskApp:
             return
         if dlg is not None:
             self.page.pop_dialog()
+        self._show_role_card_editor(card)
+
+    def _show_role_card_editor(self, card):
+        card_id = card["id"]
         worlds = self.db.list_worlds()
         name_field = ft.TextField(label="角色名", value=card["name"])
         content_field = ft.TextField(
@@ -1506,8 +1940,7 @@ class TaskApp:
 
     def _cancel_role_card_editor(self):
         self.page.pop_dialog()
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _save_role_card_edit(self, card_id, name_field, content_field,
                              world_dd, dlg):
@@ -1523,8 +1956,7 @@ class TaskApp:
         )
         self.page.pop_dialog()
         self._toast("角色卡已保存")
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _open_world_manager(self, dlg=None):
         if dlg is not None:
@@ -1586,8 +2018,7 @@ class TaskApp:
 
     def _close_world_manager(self):
         self.page.pop_dialog()
-        self._ai_center = True
-        self._render()
+        self._return_to_roleplay_context()
 
     def _open_world_editor(self, world_id):
         self.page.pop_dialog()
@@ -1743,7 +2174,7 @@ class TaskApp:
 
     def _cancel_user_card_editor(self):
         self.page.pop_dialog()
-        self._choose_roleplay()
+        self._return_to_roleplay_context()
 
     def _save_user_card(self, user_card_id, name_field, content_field, dlg):
         name = (name_field.value or "").strip()
@@ -1755,7 +2186,7 @@ class TaskApp:
         else:
             self.db.create_user_card(name, content_field.value)
         self.page.pop_dialog()
-        self._choose_roleplay()
+        self._return_to_roleplay_context()
 
     def _delete_user_card(self, user_card_id):
         if not user_card_id:
@@ -1764,7 +2195,7 @@ class TaskApp:
         self.page.pop_dialog()
         self.db.delete_user_card(user_card_id)
         self._toast("用户人设已删除")
-        self._choose_roleplay()
+        self._return_to_roleplay_context()
 
     def _begin_roleplay(self, card_id, dlg=None, relation=None, affection=None,
                         user_card_id=None):
@@ -1946,6 +2377,14 @@ class TaskApp:
         self._ai_session_id = None
         self._ai_input = None
         self._ai_center = True
+        self._render()
+
+    def _toggle_suggestion_mode(self, e=None):
+        if not self._ai_session_id:
+            return
+        meta = self.db.get_ai_session_meta(self._ai_session_id)
+        meta["suggestion_mode"] = not bool(meta.get("suggestion_mode"))
+        self.db.set_ai_session_meta(self._ai_session_id, meta)
         self._render()
 
     def _ai_session_title(self):
@@ -2239,6 +2678,33 @@ class TaskApp:
                     ),
                 ))
 
+        if kind == "roleplay":
+            options = self._suggestion_options.get(sess["id"], [])
+            if options:
+                rows.append(ft.Container(
+                    margin=ft.Margin(left=12, right=12, top=6, bottom=2),
+                    content=ft.Column(
+                        [
+                            ft.Text("你可以这样回应：", size=11,
+                                    color=ft.Colors.BLUE_GREY_500),
+                            *[
+                                ft.TextButton(
+                                    content=opt,
+                                    style=ft.ButtonStyle(
+                                        bgcolor=ft.Colors.with_opacity(
+                                            0.08, ft.Colors.BLUE_200
+                                        ),
+                                    ),
+                                    on_click=lambda e, t=opt: self._send_suggestion(t),
+                                )
+                                for opt in options
+                            ],
+                        ],
+                        tight=True,
+                        spacing=4,
+                    ),
+                ))
+
         if self._ai_input is None:
             self._ai_input = ft.TextField(
                 hint_text="回复 AI，或输入新问题",
@@ -2360,11 +2826,73 @@ class TaskApp:
                     self._merge_role_state(sess["role_card_id"], state)
             if clean:
                 self.db.append_ai_message(sess["id"], "assistant", clean)
+            if skill_id == "roleplay":
+                meta = self.db.get_ai_session_meta(sess["id"])
+                if meta.get("suggestion_mode"):
+                    try:
+                        self._suggestion_options[sess["id"]] = (
+                            await self._generate_reply_suggestions(sess)
+                        )
+                    except Exception:
+                        self._suggestion_options.pop(sess["id"], None)
+                else:
+                    self._suggestion_options.pop(sess["id"], None)
         except Exception as ex:
             self._toast(f"AI 错误：{ex}")
         finally:
             self._ai_busy = False
             self._render()
+
+    def _send_suggestion(self, text):
+        if self._ai_input is None or self._ai_busy:
+            return
+        self._ai_input.value = text
+        runner = getattr(self.page, "run_task", None)
+        if runner:
+            runner(self._send_ai_message, None)
+
+    async def _generate_reply_suggestions(self, sess):
+        cfg = self.db.get_ai_config()
+        history = self.db.get_ai_messages(sess["id"], limit=16)
+        card = (
+            self.db.get_role_card(sess["role_card_id"])
+            if sess.get("role_card_id") else None
+        )
+        user_card = (
+            self.db.get_user_card(sess["user_card_id"])
+            if sess.get("user_card_id") else None
+        )
+        context = "\n".join(
+            f"{'你' if m['role'] == 'user' else card['name'] if card else 'AI'}：{m['content']}"
+            for m in history[-12:]
+        )
+        system = (
+            "你是角色扮演建议助手。根据以下对话和角色设定，"
+            "以用户的第一人称生成 3 条简短回复建议，每行一条，"
+            "不要编号，不要解释，不要加引号。"
+        )
+        extra = ""
+        if user_card:
+            extra += f"\n用户人设：{user_card['content']}"
+        if card:
+            extra += f"\n角色设定：{card['content'][:500]}"
+        payload = [
+            {"role": "system", "content": system + extra},
+            {"role": "user", "content": context or "还没有对话"},
+        ]
+        reply = await asyncio.to_thread(
+            chat_completion,
+            cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+            payload,
+        )
+        lines = []
+        for line in reply.splitlines():
+            line = line.strip().lstrip("-•*").strip()
+            if line and line not in lines:
+                lines.append(line)
+            if len(lines) >= 3:
+                break
+        return lines
 
     async def _chat_with_role_card(self, sess):
         """带角色卡按需加载的 AI 请求；AI 请求 @load 时自动注入后重试。"""
@@ -2413,6 +2941,7 @@ class TaskApp:
                     )
                     self._role_loaded_sections[sess["id"]] = loaded
                 system = build_role_system(card["content"], state, loaded)
+                system += "\n\n" + build_autonomy_rule(card.get("autonomy"))
             else:
                 system = skill["system"] if skill else "你是一个简洁的 AI 助手。"
                 if skill and skill["id"] == "role_grill":
@@ -2575,6 +3104,14 @@ class TaskApp:
             label="或新建世界观",
             hint_text="留空则使用上面的选择",
         )
+        card_type_dd = ft.Dropdown(
+            label="保存为",
+            value="ai",
+            options=[
+                ft.dropdown.Option(key="ai", text="AI 角色卡"),
+                ft.dropdown.Option(key="user", text="我的人设卡"),
+            ],
+        )
         dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("确认生成角色卡"),
@@ -2584,6 +3121,7 @@ class TaskApp:
                             color=ft.Colors.BLUE_GREY_600),
                     world_dd,
                     new_world_field,
+                    card_type_dd,
                     ft.Text(content, size=12, selectable=True),
                 ],
                 tight=True,
@@ -2595,7 +3133,7 @@ class TaskApp:
                 ft.FilledButton(
                     content="创建角色卡",
                     on_click=lambda e: self._create_role_from_ai(
-                        content, world_dd, new_world_field
+                        content, world_dd, new_world_field, card_type_dd
                     ),
                 ),
             ],
@@ -2603,7 +3141,8 @@ class TaskApp:
         )
         self.page.show_dialog(dlg)
 
-    def _create_role_from_ai(self, content, world_dd=None, new_world_field=None):
+    def _create_role_from_ai(self, content, world_dd=None, new_world_field=None,
+                             card_type_dd=None):
         sections = parse_role_card(content)
         core = sections.get("核心", "")
         if not core:
@@ -2612,6 +3151,7 @@ class TaskApp:
         first_line = core.splitlines()[0].strip()
         name = first_line.split("：", 1)[-1].strip() if "：" in first_line else ""
         name = name or "AI 角色"
+        card_type = card_type_dd.value if card_type_dd is not None else "ai"
         world_id = None
         new_world = (
             (new_world_field.value or "").strip()
@@ -2623,14 +3163,23 @@ class TaskApp:
             )
         elif world_dd is not None and world_dd.value:
             world_id = int(world_dd.value)
-        content = self._attach_world_to_content(content, world_id)
+        if card_type == "user":
+            content = content
+        else:
+            content = self._attach_world_to_content(content, world_id)
         self.page.pop_dialog()
-        self.db.create_role_card(name, content, world_id)
+        if card_type == "user":
+            self.db.create_user_card(name, content)
+            self._toast(f"已保存用户人设：{name}")
+        else:
+            self.db.create_role_card(name, content, world_id)
+            self._toast(f"已生成角色卡：{name}")
         self._ai_session_id = None
         self._ai_input = None
         self._ai_center = True
         self._toast(f"已生成角色卡：{name}")
         self._render()
+        self._return_to_roleplay_context()
 
     # ---------- AI 任务树落库 ----------
     def _preview_ai_tasks(self, session_id):

@@ -203,6 +203,17 @@ class Database:
                 )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_character_relations(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role_card_id_a INTEGER NOT NULL,
+                    role_card_id_b INTEGER NOT NULL,
+                    relation TEXT DEFAULT '',
+                    affection INTEGER DEFAULT 50,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(role_card_id_a, role_card_id_b)
+                )"""
+            )
+            c.execute(
                 """CREATE TABLE IF NOT EXISTS ai_worlds(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -273,6 +284,8 @@ class Database:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN state TEXT DEFAULT '{}'")
             if "world_id" not in card_cols:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN world_id INTEGER")
+            if "autonomy" not in card_cols:
+                c.execute("ALTER TABLE ai_role_cards ADD COLUMN autonomy INTEGER DEFAULT 50")
             group_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_group_chats)")]
             if "current_scene" not in group_cols:
                 c.execute("ALTER TABLE ai_group_chats ADD COLUMN current_scene TEXT DEFAULT ''")
@@ -804,6 +817,14 @@ class Database:
                 (new_name, new_content, new_world, card_id),
             )
 
+    def set_role_autonomy(self, card_id, autonomy):
+        value = max(0, min(100, int(autonomy or 50)))
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_role_cards SET autonomy=? WHERE id=?",
+                (value, card_id),
+            )
+
     def list_role_cards(self):
         with self._conn() as c:
             rows = c.execute(
@@ -845,6 +866,11 @@ class Database:
                 "DELETE FROM ai_role_relations WHERE role_card_id=?",
                 (card_id,),
             )
+            c.execute(
+                "DELETE FROM ai_character_relations "
+                "WHERE role_card_id_a=? OR role_card_id_b=?",
+                (card_id, card_id),
+            )
             c.execute("DELETE FROM ai_role_cards WHERE id=?", (card_id,))
 
     def delete_role_relations_for_role(self, role_card_id):
@@ -852,6 +878,36 @@ class Database:
             c.execute(
                 "DELETE FROM ai_role_relations WHERE role_card_id=?",
                 (role_card_id,),
+            )
+            c.execute(
+                "DELETE FROM ai_character_relations "
+                "WHERE role_card_id_a=? OR role_card_id_b=?",
+                (role_card_id, role_card_id),
+            )
+
+    def get_character_relation(self, role_a_id, role_b_id):
+        a, b = sorted([role_a_id, role_b_id])
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_character_relations "
+                "WHERE role_card_id_a=? AND role_card_id_b=?",
+                (a, b),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_character_relation(self, role_a_id, role_b_id,
+                                relation="", affection=50):
+        a, b = sorted([role_a_id, role_b_id])
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ai_character_relations("
+                "role_card_id_a,role_card_id_b,relation,affection,updated_at) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(role_card_id_a,role_card_id_b) DO UPDATE SET "
+                "relation=excluded.relation, affection=excluded.affection, "
+                "updated_at=excluded.updated_at",
+                (a, b, relation or "", int(affection or 50), now),
             )
 
     def list_ai_sessions(self):

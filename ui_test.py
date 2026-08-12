@@ -405,6 +405,13 @@ def main():
     texts = rendered_texts(app)
     assert any("生成任务树" in t for t in texts), texts
     assert any("角色扮演" in t for t in texts), texts
+    app._select_ai_category("角色扮演")
+    texts = rendered_texts(app)
+    assert any("聊天" in t for t in texts), texts
+    assert any("角色卡" in t for t in texts), texts
+    app._open_roleplay_cards()
+    texts = rendered_texts(app)
+    assert any("AI 角色卡" in t for t in texts), texts
     app._select_ai_category("生成任务树")
     texts = rendered_texts(app)
     assert any("AI 拷问拆解" in t for t in texts), texts
@@ -576,6 +583,9 @@ def main():
     app._begin_roleplay(role_b_id, None, "同学", "30 友好", user_card_id)
     assert db.get_role_relation(user_card_id, role_b_id)["relation"] == "同学"
     assert db.get_role_relation(user_card_id, role_a_id)["relation"] == "恋人"
+    db.set_role_autonomy(role_a_id, 80)
+    assert db.get_role_card(role_a_id)["autonomy"] == 80
+    assert "自主性：高" in ai_client.build_autonomy_rule(80)
 
     # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
     v2_file = os.path.join(tmp, "v2_role.json")
@@ -875,6 +885,7 @@ def main():
         extracted,
         types.SimpleNamespace(value=""),
         types.SimpleNamespace(value=""),
+        types.SimpleNamespace(value="ai"),
     )
     assert any(c["name"] == "拷问角色" for c in db.list_role_cards())
 
