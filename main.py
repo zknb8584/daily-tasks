@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.11"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.12"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -181,6 +181,8 @@ class TaskApp:
         self._ai_category = None        # AI 中心当前选中的板块名
         self._roleplay_view = None      # 角色扮演：home/chat/cards
         self._roleplay_card_view = "ai" # 角色卡页：ai/user
+        self._relation_map_center = None
+        self._relation_map_return_view = "cards"
         self._chat_search = ""          # 角色扮演聊天搜索
         self._chat_search_field = None
         self._card_search = ""          # 角色卡页搜索
@@ -478,6 +480,10 @@ class TaskApp:
 
     def _close_ai_center_or_category(self, e=None):
         if self._ai_category == "角色扮演" and self._roleplay_view:
+            if self._roleplay_view == "relations":
+                self._roleplay_view = self._relation_map_return_view or "cards"
+                self._render()
+                return
             self._roleplay_view = None
             self._render()
             return
@@ -493,6 +499,52 @@ class TaskApp:
     def _open_roleplay_cards(self, e=None):
         self._roleplay_view = "cards"
         self._render()
+
+    def _open_relation_map(self, center_key=None):
+        if center_key:
+            self._relation_map_center = center_key
+        self._relation_map_return_view = self._roleplay_view or "cards"
+        self._roleplay_view = "relations"
+        self._render()
+
+    def _render_relation_map_page(self):
+        role_cards = self.db.list_role_cards()
+        user_cards = self.db.list_user_cards()
+        options = [
+            ft.dropdown.Option(key=f"u{u['id']}", text=f"我：{u['name']}")
+            for u in user_cards
+        ] + [
+            ft.dropdown.Option(key=f"r{r['id']}", text=f"角色：{r['name']}")
+            for r in role_cards
+        ]
+        center = self._relation_map_center
+        if center not in [o.key for o in options]:
+            center = options[0].key if options else None
+            self._relation_map_center = center
+        center_dd = ft.Dropdown(
+            label="关系地图中心",
+            value=center,
+            options=options,
+            on_change=lambda e: self._open_relation_map(e.control.value),
+        )
+        network = self._build_relation_network(center) if center else None
+        return [
+            ft.Container(
+                margin=ft.Margin(top=8, left=12, right=12, bottom=4),
+                content=ft.Text(
+                    "选择一个角色或用户人设作为中心，查看它周围的关系网络",
+                    size=13, color=ft.Colors.BLUE_GREY_600,
+                ),
+            ),
+            ft.Container(
+                padding=ft.Padding(left=12, right=12, top=4, bottom=4),
+                content=center_dd,
+            ),
+            ft.Container(
+                alignment=ft.Alignment(0, 0),
+                content=network if network else self._hint_text("暂无关系"),
+            ),
+        ]
 
     def _close_roleplay_view(self, e=None):
         self._roleplay_view = None
@@ -853,6 +905,12 @@ class TaskApp:
                         on_click=lambda e, cid=card["id"]: self._open_role_details(cid),
                     ),
                     ft.PopupMenuItem(
+                        content=ft.Text("查看关系"),
+                        on_click=lambda e, cid=card["id"]: self._open_relation_map(
+                            f"r{cid}"
+                        ),
+                    ),
+                    ft.PopupMenuItem(
                         content=ft.Text("删除"),
                         on_click=lambda e, cid=card["id"]: self._confirm_delete_role_card(cid),
                     ),
@@ -1015,45 +1073,47 @@ class TaskApp:
                 rotate=line_angle,
             ))
             controls.append(ft.Container(
-                left=nx - 28,
-                top=ny - 28,
-                width=56,
-                height=56,
-                border_radius=28,
+                left=nx - 40,
+                top=ny - 18,
+                width=80,
+                height=36,
+                border_radius=18,
                 bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.BLUE_500),
                 alignment=ft.Alignment(0, 0),
                 content=ft.Text(
-                    node["name"][:2],
-                    size=14,
-                    weight=ft.FontWeight.BOLD,
+                    node["name"],
+                    size=11,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
                     color=ft.Colors.BLUE_800,
                 ),
             ))
             controls.append(ft.Container(
                 left=nx - 56,
-                top=ny + 32,
+                top=ny + 22,
                 width=112,
                 content=ft.Text(
-                    f"{node['name']}\n{node['relation']} · {node['affection']}",
+                    f"{node['relation']} · {node['affection']}",
                     size=10,
                     color=ft.Colors.BLUE_GREY_700,
                     text_align=ft.TextAlign.CENTER,
-                    max_lines=3,
+                    max_lines=2,
                     overflow=ft.TextOverflow.ELLIPSIS,
                 ),
             ))
         controls.append(ft.Container(
-            left=cx - 36,
-            top=cy - 36,
-            width=72,
-            height=72,
-            border_radius=36,
+            left=cx - 52,
+            top=cy - 20,
+            width=104,
+            height=40,
+            border_radius=20,
             bgcolor=ft.Colors.BLUE_700,
             alignment=ft.Alignment(0, 0),
             content=ft.Text(
-                center_name[:2],
-                size=16,
-                weight=ft.FontWeight.BOLD,
+                center_name,
+                size=12,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
                 color=ft.Colors.WHITE,
             ),
         ))
@@ -1344,6 +1404,8 @@ class TaskApp:
                 return self._render_roleplay_chat_page()
             if self._roleplay_view == "cards":
                 return self._render_roleplay_cards_page()
+            if self._roleplay_view == "relations":
+                return self._render_relation_map_page()
             return self._render_roleplay_home()
         sessions = self.db.list_ai_sessions()
         groups = self.db.list_group_chats()
@@ -1518,6 +1580,12 @@ class TaskApp:
                     ft.PopupMenuItem(
                         content=ft.Text("查看详情"),
                         on_click=lambda e, cid=card["id"]: self._open_role_details(cid),
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("查看关系"),
+                        on_click=lambda e, cid=card["id"]: self._open_relation_map(
+                            f"r{cid}"
+                        ),
                     ),
                     ft.PopupMenuItem(
                         content=ft.Text("删除"),
