@@ -459,7 +459,7 @@ def main():
         1, False,
     )
     assert app._swipe_armed[(1, str(fake_dir))] is True
-    time.sleep(0.26)
+    time.sleep(2.1)
     app._on_swipe_update(
         types.SimpleNamespace(direction=fake_dir, progress=0.3),
         1, False,

@@ -61,7 +61,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -4335,7 +4335,7 @@ class TaskApp:
         if self._swipe_blocked.get(key):
             return
         if self._swipe_armed.get(key):
-            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 0.25:
+            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 2.0:
                 return
             self._swipe_armed.pop(key, None)
             self._swipe_armed_at.pop(key, None)
