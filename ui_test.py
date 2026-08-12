@@ -562,8 +562,20 @@ def main():
     assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
 
     app._begin_roleplay(card_id, None, "同学", "30 友好")
-    assert db.role_card_state(card_id)["身份"] == "同学"
-    assert db.role_card_state(card_id)["好感度"] == "30 友好"
+    pair = db.get_role_relation(0, card_id)
+    assert pair["relation"] == "同学"
+    assert pair["affection"] == "30 友好"
+    user_card_id = db.create_user_card(
+        "旅人阿澈", "我是来自异世界的旅人，名字叫阿澈，说话直接。"
+    )
+    role_a_id = db.create_role_card("角色A", "[核心]\n名字：角色A")
+    role_b_id = db.create_role_card("角色B", "[核心]\n名字：角色B")
+    app._begin_roleplay(role_a_id, None, "恋人", "120 亲密", user_card_id)
+    assert db.get_ai_session(app._ai_session_id)["user_card_id"] == user_card_id
+    assert db.get_role_relation(user_card_id, role_a_id)["relation"] == "恋人"
+    app._begin_roleplay(role_b_id, None, "同学", "30 友好", user_card_id)
+    assert db.get_role_relation(user_card_id, role_b_id)["relation"] == "同学"
+    assert db.get_role_relation(user_card_id, role_a_id)["relation"] == "恋人"
 
     # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
     v2_file = os.path.join(tmp, "v2_role.json")

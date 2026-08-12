@@ -514,6 +514,7 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
     affection = state.get("好感度", "")
     important = state.get("重要记忆", "")
     identity = state.get("身份", "")
+    user_persona = state.get("用户人设", "")
     card_system = sections.get("系统提示", "")
 
     parts = [SKILL_BY_ID["roleplay"]["system"]]
@@ -525,6 +526,8 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
     parts.append("以下是角色卡信息：")
     if identity:
         parts.append(f"[当前身份]\n{identity}")
+    if user_persona:
+        parts.append(f"[用户人设]\n{user_persona}")
     if core:
         parts.append(f"[核心]\n{core}")
     if affection:
@@ -588,6 +591,7 @@ def build_role_system(card_content: str, state: dict, loaded=None) -> str:
         "- 像真人一样说话：用短句、口语、自然停顿；不要列点、不要总结、不要解释你在做什么。\n"
         "- 可以用（动作）或 *动作* 表达表情、语气和小动作，但不要每句都加。\n"
         "- 根据 [当前身份] 称呼用户；按 [当前情绪] 和 [好感度] 调整语气和亲疏度。\n"
+        "- [用户人设] 是正在和你对话的人，严格按它理解对方的身份、背景和说话方式，不要把用户人设当成角色卡设定。\n"
         "- 如果 [当前身份] 与角色卡 [关系] 有冲突，以 [当前身份] 为准。\n"
         "- 默认回复 1~3 句，除非用户明确要求长回答。\n"
         "- 不要只被动等用户说话：每隔 2~4 轮可以主动问一句或抛出一个新话题。\n"

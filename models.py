@@ -183,6 +183,26 @@ class Database:
                 )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_user_cards(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_role_relations(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_card_id INTEGER NOT NULL DEFAULT 0,
+                    role_card_id INTEGER NOT NULL,
+                    relation TEXT DEFAULT '',
+                    affection TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_card_id, role_card_id)
+                )"""
+            )
+            c.execute(
                 """CREATE TABLE IF NOT EXISTS ai_worlds(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -246,6 +266,8 @@ class Database:
                 c.execute("ALTER TABLE ai_sessions ADD COLUMN current_scene TEXT DEFAULT ''")
             if "meta" not in sess_cols:
                 c.execute("ALTER TABLE ai_sessions ADD COLUMN meta TEXT DEFAULT '{}'")
+            if "user_card_id" not in sess_cols:
+                c.execute("ALTER TABLE ai_sessions ADD COLUMN user_card_id INTEGER")
             card_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_role_cards)")]
             if "state" not in card_cols:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN state TEXT DEFAULT '{}'")
@@ -254,6 +276,8 @@ class Database:
             group_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_group_chats)")]
             if "current_scene" not in group_cols:
                 c.execute("ALTER TABLE ai_group_chats ADD COLUMN current_scene TEXT DEFAULT ''")
+            if "user_card_id" not in group_cols:
+                c.execute("ALTER TABLE ai_group_chats ADD COLUMN user_card_id INTEGER")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -666,13 +690,14 @@ class Database:
 
     # ---------------- AI 会话 ----------------
     def create_ai_session(self, skill_id: str, title: str, project_id=None,
-                          role_card_id=None) -> int:
+                          role_card_id=None, user_card_id=None) -> int:
         now = dt.datetime.now().isoformat(timespec="seconds")
         with self._conn() as c:
             cur = c.execute(
-                "INSERT INTO ai_sessions(skill_id,title,project_id,role_card_id,"
-                "created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                (skill_id, title, project_id, role_card_id, now, now),
+                "INSERT INTO ai_sessions("
+                "skill_id,title,project_id,role_card_id,user_card_id,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (skill_id, title, project_id, role_card_id, user_card_id, now, now),
             )
             return cur.lastrowid
 
@@ -685,6 +710,85 @@ class Database:
                 (name.strip(), content.strip(), world_id, now),
             )
             return cur.lastrowid
+
+    def create_user_card(self, name: str, content: str) -> int:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_user_cards(name,content,created_at,updated_at) "
+                "VALUES(?,?,?,?)",
+                (name.strip(), content.strip(), now, now),
+            )
+            return cur.lastrowid
+
+    def list_user_cards(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_user_cards ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_user_card(self, card_id):
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_user_cards WHERE id=?", (card_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_user_card(self, card_id, name=None, content=None):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute("SELECT * FROM ai_user_cards WHERE id=?", (card_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            new_name = (name if name is not None else row["name"]).strip()
+            new_content = (content if content is not None else row["content"]).strip()
+            c.execute(
+                "UPDATE ai_user_cards SET name=?, content=?, updated_at=? WHERE id=?",
+                (new_name, new_content, now, card_id),
+            )
+
+    def delete_user_card(self, card_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_user_cards WHERE id=?", (card_id,))
+            c.execute(
+                "DELETE FROM ai_role_relations WHERE user_card_id=?",
+                (card_id,),
+            )
+            c.execute(
+                "UPDATE ai_sessions SET user_card_id=NULL WHERE user_card_id=?",
+                (card_id,),
+            )
+            c.execute(
+                "UPDATE ai_group_chats SET user_card_id=NULL WHERE user_card_id=?",
+                (card_id,),
+            )
+
+    def get_role_relation(self, user_card_id, role_card_id):
+        user_id = user_card_id or 0
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_role_relations "
+                "WHERE user_card_id=? AND role_card_id=?",
+                (user_id, role_card_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_role_relation(self, user_card_id, role_card_id,
+                           relation="", affection=""):
+        user_id = user_card_id or 0
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ai_role_relations("
+                "user_card_id,role_card_id,relation,affection,updated_at) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_card_id,role_card_id) DO UPDATE SET "
+                "relation=excluded.relation, affection=excluded.affection, "
+                "updated_at=excluded.updated_at",
+                (user_id, role_card_id, relation or "", affection or "", now),
+            )
 
     def update_role_card(self, card_id, name=None, content=None, world_id=_UNSET):
         with self._conn() as c:
@@ -737,7 +841,18 @@ class Database:
                 "DELETE FROM ai_group_members WHERE role_card_id=?",
                 (card_id,),
             )
+            c.execute(
+                "DELETE FROM ai_role_relations WHERE role_card_id=?",
+                (card_id,),
+            )
             c.execute("DELETE FROM ai_role_cards WHERE id=?", (card_id,))
+
+    def delete_role_relations_for_role(self, role_card_id):
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM ai_role_relations WHERE role_card_id=?",
+                (role_card_id,),
+            )
 
     def list_ai_sessions(self):
         with self._conn() as c:
@@ -758,6 +873,13 @@ class Database:
         with self._conn() as c:
             c.execute(
                 "UPDATE ai_sessions SET updated_at=? WHERE id=?", (now, session_id)
+            )
+
+    def update_ai_session_user_card(self, session_id, user_card_id):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_sessions SET user_card_id=? WHERE id=?",
+                (user_card_id, session_id),
             )
 
     def rename_ai_session(self, session_id, title):
@@ -827,12 +949,13 @@ class Database:
             )
 
     # ---------------- AI 群聊 ----------------
-    def create_group_chat(self, title: str) -> int:
+    def create_group_chat(self, title: str, user_card_id=None) -> int:
         now = dt.datetime.now().isoformat(timespec="seconds")
         with self._conn() as c:
             cur = c.execute(
-                "INSERT INTO ai_group_chats(title,created_at,updated_at) VALUES(?,?,?)",
-                (title, now, now),
+                "INSERT INTO ai_group_chats("
+                "title,user_card_id,created_at,updated_at) VALUES(?,?,?,?)",
+                (title, user_card_id, now, now),
             )
             return cur.lastrowid
 

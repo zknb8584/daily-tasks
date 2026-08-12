@@ -59,7 +59,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.5.3"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.6.0"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -668,6 +668,18 @@ class TaskApp:
             label="群聊名称",
             hint_text="例如：周末小队",
         )
+        user_cards = self.db.list_user_cards()
+        user_dd = ft.Dropdown(
+            label="我的人设卡",
+            value=str(user_cards[0]["id"]) if user_cards else "",
+            options=[
+                ft.dropdown.Option(key="", text="暂不使用"),
+                *[
+                    ft.dropdown.Option(key=str(uc["id"]), text=uc["name"])
+                    for uc in user_cards
+                ],
+            ],
+        )
         checks = [
             (card["id"], ft.Checkbox(label=card["name"], value=False))
             for card in cards[:20]
@@ -676,7 +688,7 @@ class TaskApp:
             modal=True,
             title=ft.Text("新建群聊"),
             content=ft.Column(
-                [title_field, *[cb for _, cb in checks]],
+                [title_field, user_dd, *[cb for _, cb in checks]],
                 tight=True,
                 spacing=8,
                 scroll=ft.ScrollMode.AUTO,
@@ -686,7 +698,7 @@ class TaskApp:
                 ft.FilledButton(
                     content="创建群聊",
                     on_click=lambda e: self._create_group_chat(
-                        title_field, checks, dlg
+                        title_field, user_dd, checks, dlg
                     ),
                 ),
             ],
@@ -694,13 +706,14 @@ class TaskApp:
         )
         self.page.show_dialog(dlg)
 
-    def _create_group_chat(self, title_field, checks, dlg):
+    def _create_group_chat(self, title_field, user_dd, checks, dlg):
         selected = [card_id for card_id, cb in checks if cb.value]
         if not 2 <= len(selected) <= 4:
             self._toast("请选择 2~4 个角色")
             return
         title = (title_field.value or "").strip() or "新群聊"
-        group_id = self.db.create_group_chat(title)
+        user_card_id = int(user_dd.value) if user_dd and user_dd.value else None
+        group_id = self.db.create_group_chat(title, user_card_id=user_card_id)
         for card_id in selected:
             self.db.add_group_member(group_id, card_id)
         self.page.pop_dialog()
@@ -866,6 +879,11 @@ class TaskApp:
         members = self.db.group_members(group_id)
         if not members:
             return []
+        group = self.db.get_group_chat(group_id)
+        user_card = (
+            self.db.get_user_card(group["user_card_id"])
+            if group and group.get("user_card_id") else None
+        )
         history = self.db.get_group_messages(group_id, limit=80)
         user_clean, user_directives = extract_bracket_directives(user_text)
         remember_directive = has_remember_directive(user_text)
@@ -904,6 +922,17 @@ class TaskApp:
                 loaded.update(match_world_book(card["content"], user_text))
                 self._group_loaded_sections[(group_id, card["id"])] = loaded
                 state = self.db.role_card_state(card["id"])
+                pair = self.db.get_role_relation(
+                    group["user_card_id"] if group else None,
+                    card["id"],
+                )
+                if pair:
+                    if pair.get("relation"):
+                        state["身份"] = pair["relation"]
+                    if pair.get("affection"):
+                        state["好感度"] = pair["affection"]
+                if user_card:
+                    state["用户人设"] = user_card["content"]
                 system = build_group_role_system(
                     card["content"], state, loaded, members, context
                 )
@@ -983,19 +1012,36 @@ class TaskApp:
             "还没有角色卡，先导入一份角色卡文件（txt 或 json）",
             size=12, color=ft.Colors.BLUE_GREY_600,
         ) if not cards else ft.Text("", size=12)
-        relation_dd = ft.Dropdown(
-            label="初始身份",
-            value="陌生人",
+        user_cards = self.db.list_user_cards()
+        user_dd = ft.Dropdown(
+            label="我的人设卡",
+            value=str(user_cards[0]["id"]) if user_cards else "",
             options=[
-                ft.dropdown.Option(key="陌生人", text="陌生人"),
-                ft.dropdown.Option(key="同学", text="同学"),
-                ft.dropdown.Option(key="朋友", text="朋友"),
-                ft.dropdown.Option(key="同事", text="同事"),
-                ft.dropdown.Option(key="师生", text="师生"),
-                ft.dropdown.Option(key="家人", text="家人"),
-                ft.dropdown.Option(key="恋人", text="恋人"),
-                ft.dropdown.Option(key="青梅竹马", text="青梅竹马"),
+                ft.dropdown.Option(key="", text="暂不使用"),
+                *[
+                    ft.dropdown.Option(key=str(uc["id"]), text=uc["name"])
+                    for uc in user_cards
+                ],
             ],
+        )
+        user_menu = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT,
+            tooltip="人设卡管理",
+            items=[
+                ft.PopupMenuItem(
+                    content=ft.Text("新建用户人设"),
+                    on_click=lambda e: self._open_user_card_editor(None),
+                ),
+                ft.PopupMenuItem(
+                    content=ft.Text("管理用户人设"),
+                    on_click=lambda e: self._open_user_card_manager(),
+                ),
+            ],
+        )
+        relation_field = ft.TextField(
+            label="身份/关系",
+            value="陌生人",
+            hint_text="例如：青梅竹马、异世界旅人、她的同班同学",
         )
         affection_dd = ft.Dropdown(
             label="初始好感度",
@@ -1010,24 +1056,17 @@ class TaskApp:
                 ft.dropdown.Option(key="180 依恋", text="180 依恋"),
             ],
         )
-        affection_by_relation = {
-            "陌生人": "0 中立",
-            "同学": "30 友好",
-            "朋友": "60 亲近",
-            "同事": "30 友好",
-            "师生": "30 友好",
-            "家人": "90 信赖",
-            "恋人": "120 亲密",
-            "青梅竹马": "90 信赖",
-        }
-
-        def _sync_affection(e):
-            affection_dd.value = affection_by_relation.get(
-                relation_dd.value, affection_dd.value
+        def _load_pair():
+            user_id = int(user_dd.value) if user_dd.value else 0
+            pair = self.db.get_role_relation(user_id, dropdown.value)
+            relation_field.value = (
+                pair["relation"] if pair and pair.get("relation") else "陌生人"
             )
-            self.page.update()
-
-        relation_dd.on_change = _sync_affection
+            affection_dd.value = (
+                pair["affection"] if pair and pair.get("affection") else "0 中立"
+            )
+        dropdown.on_change = lambda e: (_load_pair(), self.page.update())
+        user_dd.on_change = lambda e: (_load_pair(), self.page.update())
         actions = [
             ft.TextButton(
                 "导入角色卡",
@@ -1045,7 +1084,8 @@ class TaskApp:
             ft.FilledButton(
                 content="开始对话",
                 on_click=lambda e: self._begin_roleplay(
-                    dropdown.value, dlg, relation_dd.value, affection_dd.value
+                    dropdown.value, dlg,
+                    relation_field.value, affection_dd.value, user_dd.value,
                 ),
             ),
         ]
@@ -1065,7 +1105,15 @@ class TaskApp:
                         spacing=4,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    relation_dd if cards else ft.Text(""),
+                    ft.Row(
+                        [
+                            user_dd if cards else ft.Text(""),
+                            user_menu if cards else ft.Container(),
+                        ],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    relation_field if cards else ft.Text(""),
                     affection_dd if cards else ft.Text(""),
                 ],
                 tight=True,
@@ -1605,7 +1653,121 @@ class TaskApp:
         self._toast("世界观已删除")
         self._open_world_manager()
 
-    def _begin_roleplay(self, card_id, dlg=None, relation=None, affection=None):
+    def _open_user_card_manager(self):
+        self.page.pop_dialog()
+        cards = self.db.list_user_cards()
+        card_dd = ft.Dropdown(
+            label="选择用户人设",
+            value=str(cards[0]["id"]) if cards else None,
+            options=[
+                ft.dropdown.Option(key=str(c["id"]), text=c["name"])
+                for c in cards
+            ],
+        )
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("用户人设"),
+            content=ft.Column(
+                [
+                    card_dd if cards else ft.Text("还没有用户人设", size=13,
+                                                 color=ft.Colors.GREY),
+                ],
+                tight=True,
+                spacing=8,
+            ),
+            actions=[
+                ft.TextButton(
+                    "返回",
+                    on_click=lambda e: self._close_user_card_manager(),
+                ),
+                ft.TextButton(
+                    "新建",
+                    on_click=lambda e: self._open_user_card_editor(None),
+                ),
+                ft.TextButton(
+                    "编辑",
+                    on_click=lambda e: self._open_user_card_editor(
+                        int(card_dd.value) if card_dd.value else None
+                    ),
+                ),
+                ft.TextButton(
+                    "删除",
+                    on_click=lambda e: self._delete_user_card(
+                        int(card_dd.value) if card_dd.value else None
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _close_user_card_manager(self):
+        self.page.pop_dialog()
+        self._choose_roleplay()
+
+    def _open_user_card_editor(self, user_card_id):
+        self.page.pop_dialog()
+        card = self.db.get_user_card(user_card_id) if user_card_id else None
+        name_field = ft.TextField(label="人设名称", value=card["name"] if card else "")
+        content_field = ft.TextField(
+            label="人设内容",
+            value=card["content"] if card else "",
+            hint_text="例如：我是异世界旅人，名字叫阿澈，说话直接，擅长修理机械",
+            multiline=True,
+            min_lines=6,
+            max_lines=14,
+        )
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("编辑用户人设" if card else "新建用户人设"),
+            content=ft.Column(
+                [name_field, content_field],
+                tight=True,
+                spacing=8,
+            ),
+            actions=[
+                ft.TextButton(
+                    "取消",
+                    on_click=lambda e: self._cancel_user_card_editor(),
+                ),
+                ft.FilledButton(
+                    content="保存",
+                    on_click=lambda e: self._save_user_card(
+                        user_card_id, name_field, content_field, dlg
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _cancel_user_card_editor(self):
+        self.page.pop_dialog()
+        self._choose_roleplay()
+
+    def _save_user_card(self, user_card_id, name_field, content_field, dlg):
+        name = (name_field.value or "").strip()
+        if not name:
+            self._toast("人设名称不能为空")
+            return
+        if user_card_id:
+            self.db.update_user_card(user_card_id, name, content_field.value)
+        else:
+            self.db.create_user_card(name, content_field.value)
+        self.page.pop_dialog()
+        self._choose_roleplay()
+
+    def _delete_user_card(self, user_card_id):
+        if not user_card_id:
+            self._toast("请先选择用户人设")
+            return
+        self.page.pop_dialog()
+        self.db.delete_user_card(user_card_id)
+        self._toast("用户人设已删除")
+        self._choose_roleplay()
+
+    def _begin_roleplay(self, card_id, dlg=None, relation=None, affection=None,
+                        user_card_id=None):
         if dlg is not None:
             self.page.pop_dialog()
         if not card_id:
@@ -1623,12 +1785,14 @@ class TaskApp:
                 break
         if existing:
             sid = existing["id"]
+            if user_card_id is not None:
+                self.db.update_ai_session_user_card(sid, user_card_id)
             if not self.db.get_ai_messages(sid):
                 self._seed_roleplay_greeting(card_id, sid)
-            state = self.db.role_card_state(card_id)
+            pair = self.db.get_role_relation(user_card_id, card_id)
             state_changed = (
-                (relation and state.get("身份") != relation)
-                or (affection and state.get("好感度") != affection)
+                (relation and (not pair or pair.get("relation") != relation))
+                or (affection and (not pair or pair.get("affection") != affection))
             )
             if state_changed:
                 confirm = ft.AlertDialog(
@@ -1644,7 +1808,7 @@ class TaskApp:
                         ft.FilledButton(
                             content="应用并继续",
                             on_click=lambda e: self._apply_role_initial(
-                                card_id, sid, relation, affection
+                                card_id, sid, relation, affection, user_card_id
                             ),
                         ),
                     ],
@@ -1654,12 +1818,14 @@ class TaskApp:
                 return
         else:
             sid = self.db.create_ai_session(
-                "roleplay", f"角色扮演 · {card['name']}", role_card_id=card_id
+                "roleplay", f"角色扮演 · {card['name']}",
+                role_card_id=card_id, user_card_id=user_card_id,
             )
             self._seed_roleplay_greeting(card_id, sid)
             if relation or affection:
                 self._apply_role_initial(
-                    card_id, sid, relation, affection, pop_dialog=False
+                    card_id, sid, relation, affection, user_card_id,
+                    pop_dialog=False,
                 )
                 return
         self._ai_session_id = sid
@@ -1674,15 +1840,13 @@ class TaskApp:
         if greeting and not self.db.get_ai_messages(session_id):
             self.db.append_ai_message(session_id, "assistant", greeting)
 
-    def _apply_role_initial(self, card_id, sid, relation, affection, pop_dialog=True):
+    def _apply_role_initial(self, card_id, sid, relation, affection,
+                            user_card_id=None, pop_dialog=True):
         if pop_dialog:
             self.page.pop_dialog()
-        state = self.db.role_card_state(card_id)
-        if relation:
-            state["身份"] = relation
-        if affection:
-            state["好感度"] = affection
-        self.db.save_role_card_state(card_id, state)
+        self.db.save_role_relation(
+            user_card_id, card_id, relation or "", affection or ""
+        )
         self._ai_session_id = sid
         self._ai_center = False
         self._render()
@@ -1790,6 +1954,15 @@ class TaskApp:
 
     def _role_state_card(self, card_id, session_id):
         state = self.db.role_card_state(card_id)
+        sess = self.db.get_ai_session(session_id) if session_id else None
+        pair = self.db.get_role_relation(
+            sess.get("user_card_id") if sess else None, card_id
+        )
+        if pair:
+            if pair.get("relation"):
+                state["身份"] = pair["relation"]
+            if pair.get("affection"):
+                state["好感度"] = pair["affection"]
         identity = state.get("身份", "未设定")
         affection = state.get("好感度", "未建立")
         emotion = state.get("当前情绪", "平静")
@@ -1881,6 +2054,13 @@ class TaskApp:
 
     def _open_edit_state(self, card_id):
         state = self.db.role_card_state(card_id)
+        sess = self.db.get_ai_session(self._ai_session_id) if self._ai_session_id else None
+        pair = self.db.get_role_relation(
+            sess.get("user_card_id") if sess else None, card_id
+        )
+        if pair:
+            state["身份"] = pair.get("relation") or ""
+            state["好感度"] = pair.get("affection") or ""
         identity = ft.TextField(label="身份", value=state.get("身份", ""))
         affection = ft.TextField(label="好感度", value=state.get("好感度", ""))
         emotion = ft.TextField(label="当前情绪", value=state.get("当前情绪", ""))
@@ -1921,6 +2101,13 @@ class TaskApp:
 
     def _save_edit_state(self, card_id, identity, affection, emotion,
                          memory, important, group_memory, dlg):
+        sess = self.db.get_ai_session(self._ai_session_id) if self._ai_session_id else None
+        self.db.save_role_relation(
+            sess.get("user_card_id") if sess else None,
+            card_id,
+            identity.value,
+            affection.value,
+        )
         state = {
             "身份": identity.value,
             "好感度": affection.value,
@@ -1962,6 +2149,7 @@ class TaskApp:
         for sess in self.db.list_ai_sessions():
             if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card_id:
                 self.db.delete_ai_session(sess["id"])
+        self.db.delete_role_relations_for_role(card_id)
         self.db.save_role_card_state(card_id, {})
         if self._ai_session_id is not None:
             self._ai_session_id = None
@@ -2205,6 +2393,20 @@ class TaskApp:
                 self.db.set_ai_session_scene(sess["id"], scene)
             if card:
                 state = self.db.role_card_state(card["id"])
+                pair = self.db.get_role_relation(
+                    sess.get("user_card_id"), card["id"]
+                )
+                if pair:
+                    if pair.get("relation"):
+                        state["身份"] = pair["relation"]
+                    if pair.get("affection"):
+                        state["好感度"] = pair["affection"]
+                user_card = (
+                    self.db.get_user_card(sess["user_card_id"])
+                    if sess.get("user_card_id") else None
+                )
+                if user_card:
+                    state["用户人设"] = user_card["content"]
                 if history and history[-1]["role"] == "user":
                     loaded.update(
                         match_world_book(card["content"], history[-1]["content"])
