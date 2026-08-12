@@ -66,7 +66,7 @@ jobs:
         env:
           FLET_PYTHON_BUILD_MANIFEST: ${{ github.workspace }}/python_manifest.json
         run: |
-          flet build apk \
+          yes | flet build apk \
             --project daily_tasks \
             --product "天野陽菜" \
             --org com.example \
