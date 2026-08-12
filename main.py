@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.14"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.15"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -918,7 +918,7 @@ class TaskApp:
                     content="导入用户人设",
                     icon=ft.Icons.UPLOAD_FILE,
                     on_click=lambda e: self.page.run_task(
-                        self._import_role_card, None
+                        self._import_role_card, None, "user"
                     ),
                 ))
         return controls
@@ -2618,12 +2618,17 @@ class TaskApp:
             new_content += f"\n\n[{section}]\n{body}"
         return new_content.strip()
 
-    def _prompt_import_world(self, name, content):
-        self._pending_import = {"name": name, "content": content}
+    def _prompt_import_world(self, name, content, default_type="ai"):
+        default_type = default_type if default_type in ("ai", "user") else "ai"
+        self._pending_import = {
+            "name": name,
+            "content": content,
+            "card_type": default_type,
+        }
         worlds = self.db.list_worlds()
         card_type_dd = ft.Dropdown(
             label="导入为",
-            value="ai",
+            value=default_type,
             options=[
                 ft.dropdown.Option(key="ai", text="AI 角色卡"),
                 ft.dropdown.Option(key="user", text="我的人设卡"),
@@ -2640,15 +2645,24 @@ class TaskApp:
                 ],
             ],
         )
+        world_wrap = ft.Container(content=world_dd)
+
+        def _sync_import_type(e):
+            world_wrap.visible = card_type_dd.value == "ai"
+            self.page.update()
+
+        card_type_dd.on_change = _sync_import_type
+        world_wrap.visible = default_type == "ai"
+        title = "导入用户人设" if default_type == "user" else "导入角色卡"
         dlg = ft.AlertDialog(
             modal=True,
-            title=ft.Text("导入角色卡"),
+            title=ft.Text(title),
             content=ft.Column(
                 [
                     ft.Text(f"已解析角色：{name}", size=13,
                             color=ft.Colors.BLUE_GREY_600),
                     card_type_dd,
-                    world_dd,
+                    world_wrap,
                 ],
                 tight=True,
                 spacing=10,
@@ -2679,7 +2693,11 @@ class TaskApp:
             return
         name = self._pending_import["name"]
         content = self._pending_import["content"]
-        card_type = card_type_dd.value if card_type_dd is not None else "ai"
+        card_type = (
+            card_type_dd.value
+            if card_type_dd is not None and card_type_dd.value
+            else self._pending_import.get("card_type") or "ai"
+        )
         world_id = int(world_dd.value) if world_dd and world_dd.value else None
         if card_type == "user":
             self.db.create_user_card(name, content)
@@ -3495,7 +3513,7 @@ class TaskApp:
         self._ai_center = False
         self._render()
 
-    async def _import_role_card(self, dlg=None):
+    async def _import_role_card(self, dlg=None, default_type="ai"):
         if dlg is not None:
             self.page.pop_dialog()
         try:
@@ -3553,7 +3571,7 @@ class TaskApp:
                         )
             except Exception:
                 pass
-            self._prompt_import_world(name, content)
+            self._prompt_import_world(name, content, default_type)
         except Exception as ex:
             self._toast(f"导入失败：{ex}")
 

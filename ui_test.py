@@ -655,6 +655,18 @@ def main():
     assert "旧书店老板" in imported[0]["content"]
     assert "回复前先想动作" in imported[0]["content"]
     assert "暗门" in imported[0]["content"]
+    user_import_file = os.path.join(tmp, "user_profile.txt")
+    with open(user_import_file, "w", encoding="utf-8") as f:
+        f.write("[核心]\n名字：导入用户A\n[背景]\n来自异世界")
+    app.file_picker = FakePicker(files=[
+        types.SimpleNamespace(path=user_import_file, bytes=None, name="导入用户A")
+    ])
+    asyncio.run(app._import_role_card(None, "user"))
+    assert app._pending_import["card_type"] == "user"
+    assert "导入用户人设" in pg.last_dialog.title.value
+    app._create_imported_role_card(None, None, None)
+    assert any(c["name"] == "导入用户A" for c in db.list_user_cards())
+    assert not any(c["name"] == "导入用户A" for c in db.list_role_cards())
     app._prompt_import_world("导入用户", "[核心]\n名字：导入用户")
     app._create_imported_role_card(
         types.SimpleNamespace(value="user"),
