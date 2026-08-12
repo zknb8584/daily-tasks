@@ -625,6 +625,13 @@ def main():
     assert "旧书店老板" in imported[0]["content"]
     assert "回复前先想动作" in imported[0]["content"]
     assert "暗门" in imported[0]["content"]
+    app._prompt_import_world("导入用户", "[核心]\n名字：导入用户")
+    app._create_imported_role_card(
+        types.SimpleNamespace(value="user"),
+        types.SimpleNamespace(value=""),
+        None,
+    )
+    assert any(c["name"] == "导入用户" for c in db.list_user_cards())
 
     # ---- 角色扮演实际请求：V2 指令 + 世界书关键词自动加载 ----
     wb_card = "[核心]\n名字：世界书测试\n[系统提示]\n只按旧书店规则回复\n"

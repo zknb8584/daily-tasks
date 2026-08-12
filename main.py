@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.7"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.8"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -2072,14 +2072,6 @@ class TaskApp:
         if dlg is not None:
             self.page.pop_dialog()
         worlds = self.db.list_worlds()
-        card_type_dd = ft.Dropdown(
-            label="导入为",
-            value="ai",
-            options=[
-                ft.dropdown.Option(key="ai", text="AI 角色卡"),
-                ft.dropdown.Option(key="user", text="我的人设卡"),
-            ],
-        )
         world_dd = ft.Dropdown(
             label="选择世界观",
             value="",
@@ -2175,6 +2167,14 @@ class TaskApp:
     def _prompt_import_world(self, name, content):
         self._pending_import = {"name": name, "content": content}
         worlds = self.db.list_worlds()
+        card_type_dd = ft.Dropdown(
+            label="导入为",
+            value="ai",
+            options=[
+                ft.dropdown.Option(key="ai", text="AI 角色卡"),
+                ft.dropdown.Option(key="user", text="我的人设卡"),
+            ],
+        )
         world_dd = ft.Dropdown(
             label="绑定世界观",
             value="",
