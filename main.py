@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.2"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.3"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -722,7 +722,7 @@ class TaskApp:
                 ),
             ),
             ft.SegmentedButton(
-                selected={self._roleplay_card_view},
+                selected=[self._roleplay_card_view],
                 segments=[
                     ft.Segment(value="ai", label=ft.Text(f"AI 角色卡 ({len(role_cards)})")),
                     ft.Segment(value="user", label=ft.Text(f"我的角色卡 ({len(user_cards)})")),
