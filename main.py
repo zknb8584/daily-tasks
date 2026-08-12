@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.13"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.14"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -527,23 +527,64 @@ class TaskApp:
             value=center,
             options=options,
         )
+        center_dd.expand = True
         center_dd.on_change = lambda e: self._open_relation_map(e.control.value)
-        network = self._build_relation_network(center) if center else None
+        toolbar = ft.Row(
+            [
+                center_dd,
+                ft.IconButton(
+                    icon=ft.Icons.FIT_SCREEN,
+                    tooltip="重置视图",
+                    on_click=lambda e: self._render(),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_NOTE,
+                    tooltip="关系管理",
+                    on_click=lambda e: self._open_relation_manager(),
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
+        )
+        if not center:
+            return [
+                ft.Container(
+                    margin=ft.Margin(top=12, left=12, right=12, bottom=4),
+                    content=self._hint_text("先创建角色或用户人设，再查看关系地图"),
+                ),
+                ft.Container(
+                    padding=ft.Padding(left=12, right=12, top=4, bottom=4),
+                    content=toolbar,
+                ),
+            ]
+        nodes, edges, center_name = self._relation_network_data(center)
+        if not edges:
+            return [
+                ft.Container(
+                    margin=ft.Margin(top=12, left=12, right=12, bottom=4),
+                    content=self._hint_text("这个角色还没有建立关系"),
+                ),
+                ft.Container(
+                    padding=ft.Padding(left=12, right=12, top=4, bottom=4),
+                    content=toolbar,
+                ),
+            ]
         return [
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Text(
-                    "选择一个角色或用户人设作为中心，查看它周围的关系网络",
+                    f"关系网络 · {center_name} · {len(nodes)} 个节点",
                     size=13, color=ft.Colors.BLUE_GREY_600,
                 ),
             ),
             ft.Container(
                 padding=ft.Padding(left=12, right=12, top=4, bottom=4),
-                content=center_dd,
+                content=toolbar,
             ),
             ft.Container(
+                padding=ft.Padding(left=4, right=4, top=4, bottom=12),
                 alignment=ft.Alignment(0, 0),
-                content=network if network else self._hint_text("暂无关系"),
+                content=self._build_relation_network(center),
             ),
         ]
 
@@ -711,16 +752,6 @@ class TaskApp:
                 trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT,
                                  color=ft.Colors.BLUE_GREY_400),
                 on_click=self._open_roleplay_cards,
-                min_height=76,
-            ),
-            ft.ListTile(
-                leading=ft.Icon(ft.Icons.HUB, color=ft.Colors.TEAL_700),
-                title=ft.Text("关系地图", size=17, weight=ft.FontWeight.W_600),
-                subtitle=ft.Text("以角色或人设为中心，查看关系网络",
-                                 size=12, color=ft.Colors.BLUE_GREY_500),
-                trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT,
-                                 color=ft.Colors.BLUE_GREY_400),
-                on_click=lambda e: self._open_relation_map(),
                 min_height=76,
             ),
         ]
@@ -1025,110 +1056,351 @@ class TaskApp:
             return
         self._show_role_card_editor(card)
 
-    def _build_relation_network(self, center_key):
-        import math
-        nodes = []
-        center_name = "中心"
+    def _relation_network_data(self, center_key):
+        role_cards = self.db.list_role_cards()
+        user_cards = self.db.list_user_cards()
+        roles = {r["id"]: r for r in role_cards}
+        users = {u["id"]: u for u in user_cards}
+        nodes = {}
+        edges = []
+        seen_edges = set()
+
+        def add_node(key, name, kind, card_id):
+            nodes[key] = {
+                "key": key,
+                "name": name or ("我" if kind == "user" else "角色"),
+                "kind": kind,
+                "id": card_id,
+            }
+
+        def add_edge(a, b, relation, affection):
+            if a == b:
+                return
+            pair = tuple(sorted((a, b)))
+            if pair in seen_edges:
+                return
+            seen_edges.add(pair)
+            edges.append({
+                "source": pair[0],
+                "target": pair[1],
+                "relation": relation or "",
+                "affection": affection,
+            })
+
         if center_key.startswith("u"):
             uid = int(center_key[1:])
-            card = self.db.get_user_card(uid)
-            center_name = card["name"] if card else "我"
+            center_name = (users.get(uid) or {}).get("name") or "我"
+            add_node(center_key, center_name, "user", uid)
+            related_roles = set()
             for rel in self.db.list_role_relations():
-                if rel.get("user_card_id") == uid:
-                    nodes.append({
-                        "name": rel.get("role_name") or "角色",
-                        "relation": rel.get("relation") or "未设置",
-                        "affection": rel.get("affection"),
-                    })
+                if rel.get("user_card_id") != uid:
+                    continue
+                rid = rel.get("role_card_id")
+                if not rid:
+                    continue
+                related_roles.add(rid)
+                rkey = f"r{rid}"
+                rname = (roles.get(rid) or {}).get("name") or (
+                    rel.get("role_name") or "角色"
+                )
+                add_node(rkey, rname, "role", rid)
+                add_edge(
+                    center_key, rkey,
+                    rel.get("relation"), rel.get("affection"),
+                )
+            for rel in self.db.list_character_relations():
+                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
+                if a in related_roles and b in related_roles:
+                    add_edge(
+                        f"r{a}", f"r{b}",
+                        rel.get("relation"), rel.get("affection"),
+                    )
         else:
             rid = int(center_key[1:])
-            card = self.db.get_role_card(rid)
-            center_name = card["name"] if card else "角色"
+            center_name = (roles.get(rid) or {}).get("name") or "角色"
+            add_node(center_key, center_name, "role", rid)
+            related_roles = {rid}
             for rel in self.db.list_role_relations():
-                if rel.get("role_card_id") == rid:
-                    nodes.append({
-                        "name": rel.get("user_name") or "我",
-                        "relation": rel.get("relation") or "未设置",
-                        "affection": rel.get("affection"),
-                    })
+                if rel.get("role_card_id") != rid:
+                    continue
+                uid = rel.get("user_card_id") or 0
+                ukey = f"u{uid}"
+                uname = (users.get(uid) or {}).get("name") or (
+                    rel.get("user_name") or "我"
+                )
+                add_node(ukey, uname, "user", uid)
+                add_edge(
+                    center_key, ukey,
+                    rel.get("relation"), rel.get("affection"),
+                )
             for rel in self.db.list_character_relations():
-                if rel.get("role_card_id_a") == rid:
-                    nodes.append({
-                        "name": rel.get("role_b_name") or "角色",
-                        "relation": rel.get("relation") or "未设置",
-                        "affection": rel.get("affection"),
-                    })
-                elif rel.get("role_card_id_b") == rid:
-                    nodes.append({
-                        "name": rel.get("role_a_name") or "角色",
-                        "relation": rel.get("relation") or "未设置",
-                        "affection": rel.get("affection"),
-                    })
-        width, height = 340, 280
-        cx, cy = width / 2, height / 2
-        radius = 92
-        controls = []
-        for i, node in enumerate(nodes[:8]):
-            angle = -math.pi / 2 + 2 * math.pi * i / max(1, len(nodes[:8]))
-            nx = cx + math.cos(angle) * radius
-            ny = cy + math.sin(angle) * radius
-            dx, dy = nx - cx, ny - cy
-            length = max(10, math.hypot(dx, dy) - 24)
-            line_angle = math.atan2(dy, dx)
-            controls.append(ft.Container(
-                left=cx - length / 2,
-                top=cy - 1,
-                width=length,
-                height=2,
-                bgcolor=ft.Colors.BLUE_GREY_300,
-                rotate=line_angle,
-            ))
-            controls.append(ft.Container(
-                left=nx - 40,
-                top=ny - 18,
-                width=80,
-                height=36,
-                border_radius=18,
-                bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.BLUE_500),
-                alignment=ft.Alignment(0, 0),
-                content=ft.Text(
-                    node["name"],
-                    size=11,
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                    color=ft.Colors.BLUE_800,
-                ),
-            ))
-            controls.append(ft.Container(
-                left=nx - 56,
-                top=ny + 22,
-                width=112,
-                content=ft.Text(
-                    f"{node['relation']} · {node['affection']}",
-                    size=10,
-                    color=ft.Colors.BLUE_GREY_700,
-                    text_align=ft.TextAlign.CENTER,
-                    max_lines=2,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                ),
-            ))
-        controls.append(ft.Container(
-            left=cx - 52,
-            top=cy - 20,
-            width=104,
-            height=40,
-            border_radius=20,
-            bgcolor=ft.Colors.BLUE_700,
+                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
+                if a == rid:
+                    other = b
+                elif b == rid:
+                    other = a
+                else:
+                    continue
+                related_roles.add(other)
+                okey = f"r{other}"
+                oname = (roles.get(other) or {}).get("name") or (
+                    rel.get("role_b_name") if other == b
+                    else rel.get("role_a_name")
+                ) or "角色"
+                add_node(okey, oname, "role", other)
+                add_edge(
+                    center_key, okey,
+                    rel.get("relation"), rel.get("affection"),
+                )
+            for rel in self.db.list_character_relations():
+                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
+                if a in related_roles and b in related_roles:
+                    add_edge(
+                        f"r{a}", f"r{b}",
+                        rel.get("relation"), rel.get("affection"),
+                    )
+        return nodes, edges, center_name
+
+    def _force_layout_positions(self, nodes, edges, center_key,
+                                canvas_w, canvas_h):
+        import math
+        import random
+
+        keys = list(nodes.keys())
+        positions = {}
+        cx, cy = canvas_w / 2, canvas_h / 2
+        positions[center_key] = (cx, cy)
+        others = [k for k in keys if k != center_key]
+        rng = random.Random(17)
+        if others:
+            radius = max(130, min(canvas_w, canvas_h) * 0.38)
+            for i, key in enumerate(others):
+                ring = i // 8
+                r = radius * (1 + ring * 0.8)
+                angle = -math.pi / 2 + 2 * math.pi * i / len(others)
+                positions[key] = (
+                    cx + math.cos(angle) * r + rng.uniform(-8, 8),
+                    cy + math.sin(angle) * r + rng.uniform(-8, 8),
+                )
+        for _ in range(70):
+            forces = {key: [0.0, 0.0] for key in keys}
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
+                    k1, k2 = keys[i], keys[j]
+                    x1, y1 = positions[k1]
+                    x2, y2 = positions[k2]
+                    dx, dy = x2 - x1, y2 - y1
+                    dist = math.hypot(dx, dy) or 1.0
+                    force = 2600.0 / max(70.0, dist * dist)
+                    ux, uy = dx / dist, dy / dist
+                    forces[k1][0] -= force * ux
+                    forces[k1][1] -= force * uy
+                    forces[k2][0] += force * ux
+                    forces[k2][1] += force * uy
+            for edge in edges:
+                k1, k2 = edge["source"], edge["target"]
+                if k1 not in positions or k2 not in positions:
+                    continue
+                x1, y1 = positions[k1]
+                x2, y2 = positions[k2]
+                dx, dy = x2 - x1, y2 - y1
+                dist = math.hypot(dx, dy) or 1.0
+                spring = 0.012 * (dist - 150.0)
+                ux, uy = dx / dist, dy / dist
+                forces[k1][0] += spring * ux
+                forces[k1][1] += spring * uy
+                forces[k2][0] -= spring * ux
+                forces[k2][1] -= spring * uy
+            cx0, cy0 = positions[center_key]
+            forces[center_key][0] += (cx - cx0) * 0.25
+            forces[center_key][1] += (cy - cy0) * 0.25
+            for key in keys:
+                fx, fy = forces[key]
+                dist = math.hypot(fx, fy)
+                if dist > 1.4:
+                    fx = fx / dist * 1.4
+                    fy = fy / dist * 1.4
+                x, y = positions[key]
+                positions[key] = (
+                    max(55, min(canvas_w - 55, x + fx)),
+                    max(55, min(canvas_h - 55, y + fy)),
+                )
+        positions[center_key] = (cx, cy)
+        return positions
+
+    def _relation_edge_color(self, edge):
+        try:
+            affection = int(edge.get("affection") or 50)
+        except (TypeError, ValueError):
+            affection = 50
+        if affection <= 25:
+            return ft.Colors.BLUE_GREY_300
+        if affection <= 60:
+            return ft.Colors.LIGHT_BLUE_400
+        if affection <= 120:
+            return ft.Colors.GREEN_400
+        return ft.Colors.TEAL_600
+
+    def _relation_node_control(self, node, x, y, is_center):
+        name = node.get("name") or ("我" if node["kind"] == "user" else "角色")
+        if is_center:
+            node_w = max(118, min(210, 42 + len(name) * 15))
+            node_h = 54
+            bg = ft.Colors.BLUE_700
+            fg = ft.Colors.WHITE
+            icon = ft.Icons.CENTER_FOCUS_WEAK
+            border_color = ft.Colors.BLUE_300
+            text_size = 14
+            icon_size = 20
+        elif node["kind"] == "user":
+            node_w = max(96, min(180, 36 + len(name) * 13))
+            node_h = 48
+            bg = ft.Colors.with_opacity(0.14, ft.Colors.TEAL_600)
+            fg = ft.Colors.TEAL_900
+            icon = ft.Icons.PERSON_OUTLINE
+            border_color = ft.Colors.TEAL_200
+            text_size = 12
+            icon_size = 16
+        else:
+            node_w = max(96, min(180, 36 + len(name) * 13))
+            node_h = 48
+            bg = ft.Colors.with_opacity(0.14, ft.Colors.INDIGO_600)
+            fg = ft.Colors.INDIGO_900
+            icon = ft.Icons.FACE
+            border_color = ft.Colors.INDIGO_200
+            text_size = 12
+            icon_size = 16
+        return ft.Container(
+            left=x - node_w / 2,
+            top=y - node_h / 2,
+            width=node_w,
+            height=node_h,
+            bgcolor=bg,
+            border=ft.Border.all(1, border_color),
+            border_radius=node_h / 2,
+            alignment=ft.Alignment(0, 0),
+            ink=True,
+            content=ft.Row(
+                [
+                    ft.Icon(icon, size=icon_size, color=fg),
+                    ft.Text(
+                        name,
+                        size=text_size,
+                        weight=ft.FontWeight.W_600 if is_center
+                        else ft.FontWeight.W_500,
+                        color=fg,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                spacing=5,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            on_click=(
+                (lambda e, key=node["key"]: self._open_relation_target(key))
+                if not is_center else None
+            ),
+        )
+
+    def _relation_edge_label(self, edge, x1, y1, x2, y2, color):
+        parts = []
+        relation = (edge.get("relation") or "").strip()
+        if relation:
+            parts.append(relation)
+        affection = edge.get("affection")
+        if affection not in (None, ""):
+            try:
+                parts.append(f"好感 {int(affection)}")
+            except (TypeError, ValueError):
+                parts.append(f"好感 {affection}")
+        text = " · ".join(parts)
+        if not text:
+            return None
+        label_w = max(72, min(168, 20 + len(text) * 8))
+        return ft.Container(
+            left=(x1 + x2) / 2 - label_w / 2,
+            top=(y1 + y2) / 2 - 10,
+            width=label_w,
+            height=20,
+            bgcolor=ft.Colors.with_opacity(0.94, ft.Colors.WHITE),
+            border=ft.Border.all(1, color),
+            border_radius=10,
             alignment=ft.Alignment(0, 0),
             content=ft.Text(
-                center_name,
-                size=12,
+                text,
+                size=9,
                 max_lines=1,
                 overflow=ft.TextOverflow.ELLIPSIS,
-                color=ft.Colors.WHITE,
+                text_align=ft.TextAlign.CENTER,
+                color=ft.Colors.BLUE_GREY_800,
             ),
-        ))
-        return ft.Stack(controls, width=width, height=height)
+        )
+
+    def _build_relation_network(self, center_key):
+        import math
+
+        nodes, edges, _center_name = self._relation_network_data(center_key)
+        if not edges:
+            return ft.Container(
+                alignment=ft.Alignment(0, 0),
+                content=self._hint_text("暂无关系"),
+            )
+        canvas_w = 760
+        canvas_h = max(520, 420 + len(nodes) * 26)
+        positions = self._force_layout_positions(
+            nodes, edges, center_key, canvas_w, canvas_h
+        )
+        controls = []
+        for edge in edges:
+            x1, y1 = positions[edge["source"]]
+            x2, y2 = positions[edge["target"]]
+            dx, dy = x2 - x1, y2 - y1
+            length = math.hypot(dx, dy)
+            if length < 2:
+                continue
+            color = self._relation_edge_color(edge)
+            controls.append(ft.Container(
+                left=(x1 + x2) / 2 - length / 2,
+                top=(y1 + y2) / 2 - 1,
+                width=length,
+                height=2,
+                bgcolor=color,
+                rotate=math.atan2(dy, dx),
+            ))
+            label = self._relation_edge_label(edge, x1, y1, x2, y2, color)
+            if label is not None:
+                controls.append(label)
+        for key, node in nodes.items():
+            x, y = positions[key]
+            controls.append(
+                self._relation_node_control(node, x, y, key == center_key)
+            )
+        stack = ft.Stack(controls, width=canvas_w, height=canvas_h)
+        return ft.InteractiveViewer(
+            content=stack,
+            width=400,
+            height=440,
+            constrained=False,
+            pan_enabled=True,
+            scale_enabled=True,
+            min_scale=0.6,
+            max_scale=2.6,
+            boundary_margin=ft.Margin.all(80),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            alignment=ft.Alignment(0, 0),
+        )
+
+    def _open_relation_target(self, key):
+        if key.startswith("r"):
+            self._open_role_details(int(key[1:]))
+        elif key.startswith("u"):
+            uid = int(key[1:])
+            card = self.db.get_user_card(uid) if uid else None
+            if card:
+                self._toast(f"用户人设：{card['name']}")
+            else:
+                self._toast("未绑定用户人设")
 
     def _open_relation_manager(self):
         role_cards = self.db.list_role_cards()
@@ -1155,29 +1427,6 @@ class TaskApp:
         affection_slider = ft.Slider(
             min=0, max=200, divisions=20, value=50, label="50"
         )
-        center_options = [
-            ft.dropdown.Option(key=f"u{u['id']}", text=f"我：{u['name']}")
-            for u in user_cards
-        ] + [
-            ft.dropdown.Option(key=f"r{r['id']}", text=f"角色：{r['name']}")
-            for r in role_cards
-        ]
-        center_dd = ft.Dropdown(
-            label="关系网络中心",
-            value=center_options[0].key if center_options else None,
-            options=center_options,
-        )
-        network_container = ft.Container(
-            content=self._build_relation_network(center_dd.value),
-            height=300,
-        )
-
-        def _refresh_network(e):
-            network_container.content = self._build_relation_network(center_dd.value)
-            self.page.update()
-
-        center_dd.on_change = _refresh_network
-
         def _refresh_first():
             if mode_value[0] == "user_ai":
                 options = [
@@ -1286,8 +1535,6 @@ class TaskApp:
             title=ft.Text("关系管理"),
             content=ft.Column(
                 [
-                    center_dd,
-                    network_container,
                     type_seg,
                     first_dd,
                     second_dd,

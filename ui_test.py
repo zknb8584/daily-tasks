@@ -600,6 +600,33 @@ def main():
     db.delete_draft(draft_id)
     assert not any(d["name"] == "草稿A" for d in db.list_drafts())
 
+    # ---- 关系地图：角色卡页独立入口 + 可缩放网络图 ----
+    db.save_character_relation(role_a_id, role_b_id, "旧识", 70)
+    app._close_ai_chat()
+    app._select_ai_category("角色扮演")
+    app._open_roleplay_cards()
+    texts = rendered_texts(app)
+    assert any("关系地图" in t for t in texts), texts
+    app._open_relation_map(f"r{role_a_id}")
+    assert app._roleplay_view == "relations"
+    texts = rendered_texts(app)
+    assert any("关系网络" in t for t in texts), texts
+    assert any("角色A" in t for t in texts), texts
+    assert any("角色B" in t for t in texts), texts
+    nodes, edges, center_name = app._relation_network_data(f"r{role_a_id}")
+    assert center_name == "角色A"
+    assert len(nodes) >= 3, nodes
+    assert len(edges) >= 2, edges
+    viewer = app._build_relation_network(f"r{role_a_id}")
+    assert isinstance(viewer, ft.InteractiveViewer)
+    assert isinstance(viewer.content, ft.Stack)
+    app._open_relation_manager()
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    manager_texts = []
+    collect_text(pg.last_dialog, manager_texts)
+    assert not any("关系网络中心" in t for t in manager_texts)
+    app.page.pop_dialog()
+
     # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
     v2_file = os.path.join(tmp, "v2_role.json")
     with open(v2_file, "w", encoding="utf-8") as f:
