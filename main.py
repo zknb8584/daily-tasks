@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.12"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.13"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -503,7 +503,8 @@ class TaskApp:
     def _open_relation_map(self, center_key=None):
         if center_key:
             self._relation_map_center = center_key
-        self._relation_map_return_view = self._roleplay_view or "cards"
+        if self._roleplay_view != "relations":
+            self._relation_map_return_view = self._roleplay_view or "home"
         self._roleplay_view = "relations"
         self._render()
 
@@ -525,8 +526,8 @@ class TaskApp:
             label="关系地图中心",
             value=center,
             options=options,
-            on_change=lambda e: self._open_relation_map(e.control.value),
         )
+        center_dd.on_change = lambda e: self._open_relation_map(e.control.value)
         network = self._build_relation_network(center) if center else None
         return [
             ft.Container(
@@ -712,6 +713,16 @@ class TaskApp:
                 on_click=self._open_roleplay_cards,
                 min_height=76,
             ),
+            ft.ListTile(
+                leading=ft.Icon(ft.Icons.HUB, color=ft.Colors.TEAL_700),
+                title=ft.Text("关系地图", size=17, weight=ft.FontWeight.W_600),
+                subtitle=ft.Text("以角色或人设为中心，查看关系网络",
+                                 size=12, color=ft.Colors.BLUE_GREY_500),
+                trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT,
+                                 color=ft.Colors.BLUE_GREY_400),
+                on_click=lambda e: self._open_relation_map(),
+                min_height=76,
+            ),
         ]
 
     def _render_roleplay_chat_page(self):
@@ -810,10 +821,10 @@ class TaskApp:
                         ft.Text("角色卡", size=17, weight=ft.FontWeight.BOLD,
                                 color=ft.Colors.BLUE_GREY_800),
                         ft.Container(expand=True),
-                        ft.IconButton(
+                        ft.TextButton(
+                            content="关系地图",
                             icon=ft.Icons.HUB,
-                            tooltip="关系",
-                            on_click=lambda e: self._open_relation_manager(),
+                            on_click=lambda e: self._open_relation_map(),
                         ),
                         ft.IconButton(
                             icon=ft.Icons.PUBLIC,
