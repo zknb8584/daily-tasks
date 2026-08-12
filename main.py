@@ -28,6 +28,7 @@ import io
 import os
 import random
 import sys
+import time
 
 import flet as ft
 
@@ -58,7 +59,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.5.2"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.5.3"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -174,6 +175,7 @@ class TaskApp:
         self._calendar_month = today.month
         self._selected_day = today      # 日历选中的日期
         self._ai_center = False         # 是否在 AI 中心
+        self._ai_category = None        # AI 中心当前选中的板块名
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
@@ -184,7 +186,7 @@ class TaskApp:
         self._group_loaded_sections = {}  # 群聊里各角色已加载的角色卡段
         self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
         self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动
-        self._swipe_active = {}         # 两段式滑动：当前是否仍处于同一次拖动
+        self._swipe_armed_at = {}       # 两段式滑动：第一次滑动的触发时间
         self._swipe_blocked = {}        # 反向拖动取消后，本次手势不再自动换操作
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
@@ -333,9 +335,12 @@ class TaskApp:
         elif ai:
             self.page.appbar.leading = ft.IconButton(
                 icon=ft.Icons.ARROW_BACK, tooltip="返回",
-                icon_color=ft.Colors.ON_PRIMARY, on_click=self._close_ai_center,
+                icon_color=ft.Colors.ON_PRIMARY,
+                on_click=self._close_ai_center_or_category,
             )
-            self.page.appbar.title = ft.Text("AI")
+            self.page.appbar.title = ft.Text(
+                self._ai_category or "AI"
+            )
             self.page.appbar.actions = [self._settings_icon()]
         elif ai_chat:
             self.page.appbar.leading = ft.IconButton(
@@ -415,26 +420,69 @@ class TaskApp:
     # ---------- AI 中心 ----------
     def _open_ai_center(self, e=None):
         self._ai_center = True
+        self._ai_category = None
         self._render()
 
     def _close_ai_center(self, e=None):
         self._ai_center = False
+        self._ai_category = None
         self._render()
+
+    def _select_ai_category(self, category):
+        self._ai_category = category
+        self._render()
+
+    def _close_ai_category(self, e=None):
+        self._ai_category = None
+        self._render()
+
+    def _close_ai_center_or_category(self, e=None):
+        if self._ai_category:
+            self._close_ai_category()
+        else:
+            self._close_ai_center()
 
     def _render_ai_center(self):
         controls = [
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Text(
-                    "按用途进入对应板块，聊天记录也会按板块归类",
+                    "选择一个板块，进入后查看功能和聊天记录",
                     size=13, color=ft.Colors.BLUE_GREY_600,
                 ),
             )
         ]
+        if not self._ai_category:
+            category_desc = {
+                "生成任务树": "AI 拷问拆解 / 快速拆解 / 任务树挂载",
+                "回答与解惑": "通用问答 / 课堂速解",
+                "角色扮演": "角色聊天 / 群聊 / 角色卡生成",
+            }
+            for category, _ in AI_CATEGORIES:
+                controls.append(ft.ListTile(
+                    leading=ft.Icon(
+                        ft.Icons.FOLDER_OPEN,
+                        color=ft.Colors.BLUE_700,
+                    ),
+                    title=ft.Text(category, weight=ft.FontWeight.W_600, size=17),
+                    subtitle=ft.Text(
+                        category_desc.get(category, ""),
+                        size=12, color=ft.Colors.BLUE_GREY_500,
+                    ),
+                    trailing=ft.Icon(
+                        ft.Icons.CHEVRON_RIGHT,
+                        color=ft.Colors.BLUE_GREY_400,
+                    ),
+                    on_click=lambda e, c=category: self._select_ai_category(c),
+                    min_height=72,
+                ))
+            return controls
         sessions = self.db.list_ai_sessions()
         groups = self.db.list_group_chats()
         role_cards = self.db.list_role_cards()
         for category, skill_ids in AI_CATEGORIES:
+            if category != self._ai_category:
+                continue
             controls.append(ft.Container(
                 margin=ft.Margin(top=16, left=12, right=12, bottom=4),
                 content=ft.Text(category, size=13, weight=ft.FontWeight.BOLD,
@@ -3096,25 +3144,25 @@ class TaskApp:
         key = (item_id, str(direction))
         progress = float(getattr(e, "progress", 0) or 0)
         if progress < 0.05:
-            self._swipe_active[key] = False
             self._swipe_blocked[key] = False
             return
-        was_active = self._swipe_active.get(key, False)
-        self._swipe_active[key] = True
         if progress < 0.2:
             if progress > 0.08:
                 for old_key in list(self._swipe_armed):
                     if old_key[0] == item_id and old_key[1] != str(direction):
                         self._swipe_armed.pop(old_key, None)
+                        self._swipe_armed_at.pop(old_key, None)
                         self._swipe_blocked[key] = True
                         self._toast("已取消，重新滑动可选择其他操作")
                         return
             return
         if self._swipe_blocked.get(key):
             return
-        if self._swipe_armed.get(key) and not was_active:
+        if self._swipe_armed.get(key):
+            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 0.25:
+                return
             self._swipe_armed.pop(key, None)
-            self._swipe_active[key] = False
+            self._swipe_armed_at.pop(key, None)
             if direction == ft.DismissDirection.END_TO_START:
                 self._dismiss_delete(item_id)
             else:
@@ -3124,7 +3172,9 @@ class TaskApp:
             for old_key in list(self._swipe_armed):
                 if old_key[0] == item_id:
                     self._swipe_armed.pop(old_key, None)
+                    self._swipe_armed_at.pop(old_key, None)
             self._swipe_armed[key] = True
+            self._swipe_armed_at[key] = time.monotonic()
             if direction == ft.DismissDirection.END_TO_START:
                 label = "删除"
             else:
@@ -3335,7 +3385,7 @@ class TaskApp:
         elif self._ai_session_id is not None:
             self._close_ai_chat()
         elif self._ai_center:
-            self._close_ai_center()
+            self._close_ai_center_or_category()
         elif self._search_mode:
             self._close_search()
         elif self._calendar_view:

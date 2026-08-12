@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import os
 import tempfile
+import time
 import types
 
 import flet as ft
@@ -402,10 +403,12 @@ def main():
 
     app._open_ai_center()
     texts = rendered_texts(app)
-    assert any("AI 拷问拆解" in t for t in texts), texts
-    assert any("AI 测试会话" in t for t in texts), texts
     assert any("生成任务树" in t for t in texts), texts
     assert any("角色扮演" in t for t in texts), texts
+    app._select_ai_category("生成任务树")
+    texts = rendered_texts(app)
+    assert any("AI 拷问拆解" in t for t in texts), texts
+    assert any("AI 测试会话" in t for t in texts), texts
 
     app._open_ai_session(sid)
     texts = rendered_texts(app)
@@ -441,17 +444,15 @@ def main():
     wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
     assert isinstance(wrapper, ft.Dismissible)
     app._swipe_armed = {}
-    app._swipe_active = {}
+    app._swipe_armed_at = {}
+    app._swipe_blocked = {}
     fake_dir = ft.DismissDirection.END_TO_START
     app._on_swipe_update(
         types.SimpleNamespace(direction=fake_dir, progress=0.3),
         1, False,
     )
     assert app._swipe_armed[(1, str(fake_dir))] is True
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=fake_dir, progress=0.01),
-        1, False,
-    )
+    time.sleep(0.26)
     app._on_swipe_update(
         types.SimpleNamespace(direction=fake_dir, progress=0.3),
         1, False,
