@@ -58,7 +58,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.5.0"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.5.1"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -184,6 +184,7 @@ class TaskApp:
         self._group_loaded_sections = {}  # 群聊里各角色已加载的角色卡段
         self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
         self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动
+        self._swipe_active = {}         # 两段式滑动：当前是否仍处于同一次拖动
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
@@ -3054,8 +3055,8 @@ class TaskApp:
             content=tile,
             dismiss_direction=ft.DismissDirection.HORIZONTAL,
             dismiss_thresholds={
-                ft.DismissDirection.END_TO_START: 0.85,
-                ft.DismissDirection.START_TO_END: 0.85,
+                ft.DismissDirection.END_TO_START: 1.5,
+                ft.DismissDirection.START_TO_END: 1.5,
             },
             background=ft.Container(
                 alignment=ft.Alignment(0, 0),
@@ -3083,29 +3084,41 @@ class TaskApp:
                     spacing=6,
                 ),
             ),
-            on_confirm_dismiss=lambda e, i=item_id, d=done: self._on_confirm_dismiss(
+            on_update=lambda e, i=item_id, d=done: self._on_swipe_update(
                 e, i, d
             ),
             on_dismiss=lambda e, i=item_id, d=done: self._on_dismiss(e, i, d),
         )
 
-    async def _on_confirm_dismiss(self, e, item_id, done):
+    def _on_swipe_update(self, e, item_id, done):
         direction = getattr(e, "direction", None)
         key = (item_id, str(direction))
-        if self._swipe_armed.get(key):
-            self._swipe_armed.pop(key, None)
-            await e.control.confirm_dismiss(True)
+        progress = float(getattr(e, "progress", 0) or 0)
+        if progress < 0.05:
+            self._swipe_active[key] = False
             return
-        for old_key in list(self._swipe_armed):
-            if old_key[0] == item_id:
-                self._swipe_armed.pop(old_key, None)
-        self._swipe_armed[key] = True
-        if direction == ft.DismissDirection.END_TO_START:
-            label = "删除"
-        else:
-            label = "恢复" if done else "完成"
-        self._toast(f"已显示操作，再滑动一次确认{label}")
-        await e.control.confirm_dismiss(False)
+        was_active = self._swipe_active.get(key, False)
+        self._swipe_active[key] = True
+        if progress < 0.2:
+            return
+        if self._swipe_armed.get(key) and not was_active:
+            self._swipe_armed.pop(key, None)
+            self._swipe_active[key] = False
+            if direction == ft.DismissDirection.END_TO_START:
+                self._dismiss_delete(item_id)
+            else:
+                self._dismiss_complete(item_id, done)
+            return
+        if not self._swipe_armed.get(key):
+            for old_key in list(self._swipe_armed):
+                if old_key[0] == item_id:
+                    self._swipe_armed.pop(old_key, None)
+            self._swipe_armed[key] = True
+            if direction == ft.DismissDirection.END_TO_START:
+                label = "删除"
+            else:
+                label = "恢复" if done else "完成"
+            self._toast(f"已显示操作，再滑动一次确认{label}")
 
     def _on_dismiss(self, e, item_id, done):
         direction = getattr(e, "direction", None)

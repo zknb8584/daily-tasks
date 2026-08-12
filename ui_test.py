@@ -440,22 +440,23 @@ def main():
     # ---- 滑动：Dismissible 包装构造不崩 ----
     wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
     assert isinstance(wrapper, ft.Dismissible)
-    confirm_calls = []
-    class FakeDismissible:
-        async def confirm_dismiss(self, value):
-            confirm_calls.append(value)
     app._swipe_armed = {}
+    app._swipe_active = {}
     fake_dir = ft.DismissDirection.END_TO_START
-    asyncio.run(app._on_confirm_dismiss(
-        types.SimpleNamespace(direction=fake_dir, control=FakeDismissible()),
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=fake_dir, progress=0.3),
         1, False,
-    ))
+    )
     assert app._swipe_armed[(1, str(fake_dir))] is True
-    asyncio.run(app._on_confirm_dismiss(
-        types.SimpleNamespace(direction=fake_dir, control=FakeDismissible()),
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=fake_dir, progress=0.01),
         1, False,
-    ))
-    assert confirm_calls == [False, True]
+    )
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=fake_dir, progress=0.3),
+        1, False,
+    )
+    assert app._swipe_armed == {}
 
     # ---- 预览按钮：最后一条无大纲时隐藏，有大纲时显示 ----
     db.append_ai_message(sid, "assistant", "好的，明白了。")
