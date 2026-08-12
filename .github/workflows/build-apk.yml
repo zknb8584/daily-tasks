@@ -66,20 +66,29 @@ jobs:
         env:
           FLET_PYTHON_BUILD_MANIFEST: ${{ github.workspace }}/python_manifest.json
         run: |
-          yes | flet build apk \
-            --project daily_tasks \
-            --product "天野陽菜" \
-            --org com.example \
-            --bundle-id com.example.daily_tasks \
-            --build-version 1.0.0 \
-            --build-number 1 \
-            --android-permissions android.permission.POST_NOTIFICATIONS=true android.permission.VIBRATE=true \
-            --android-adaptive-icon-background "#3F51B5" \
-            --arch arm64-v8a \
-            --android-signing-key-store "${{ github.workspace }}/android/daily_tasks.keystore" \
-            --android-signing-key-store-password "DT-apk-2026-key" \
-            --android-signing-key-password "DT-apk-2026-key" \
-            --android-signing-key-alias daily_tasks
+          for i in 1 2 3; do
+            echo "Flet build attempt $i"
+            if yes | flet build apk \
+              --project daily_tasks \
+              --product "天野陽菜" \
+              --org com.example \
+              --bundle-id com.example.daily_tasks \
+              --build-version 1.0.0 \
+              --build-number 1 \
+              --android-permissions android.permission.POST_NOTIFICATIONS=true android.permission.VIBRATE=true \
+              --android-adaptive-icon-background "#3F51B5" \
+              --arch arm64-v8a \
+              --android-signing-key-store "${{ github.workspace }}/android/daily_tasks.keystore" \
+              --android-signing-key-store-password "DT-apk-2026-key" \
+              --android-signing-key-password "DT-apk-2026-key" \
+              --android-signing-key-alias daily_tasks
+            then
+              echo "Flet build succeeded"
+              break
+            fi
+            echo "Flet build failed, retrying..."
+            sleep 20
+          done
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
