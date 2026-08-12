@@ -1008,6 +1008,32 @@ class Database:
                 (a, b),
             )
 
+    def list_role_relations(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT r.*, "
+                "COALESCE(uc.name, '我') AS user_name, "
+                "rc.name AS role_name "
+                "FROM ai_role_relations r "
+                "LEFT JOIN ai_user_cards uc ON uc.id=r.user_card_id "
+                "LEFT JOIN ai_role_cards rc ON rc.id=r.role_card_id "
+                "ORDER BY r.updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_character_relations(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT r.*, "
+                "a.name AS role_a_name, "
+                "b.name AS role_b_name "
+                "FROM ai_character_relations r "
+                "LEFT JOIN ai_role_cards a ON a.id=r.role_card_id_a "
+                "LEFT JOIN ai_role_cards b ON b.id=r.role_card_id_b "
+                "ORDER BY r.updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_ai_sessions(self):
         with self._conn() as c:
             rows = c.execute(

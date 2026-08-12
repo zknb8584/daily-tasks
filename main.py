@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.9"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.10"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -981,6 +981,24 @@ class TaskApp:
         affection_slider = ft.Slider(
             min=0, max=200, divisions=20, value=50, label="50"
         )
+        relation_lines = []
+        for rel in self.db.list_role_relations():
+            relation_lines.append(
+                f"{rel.get('user_name') or '我'} ↔ {rel.get('role_name') or '?'}："
+                f"{rel.get('relation') or '未设置'}，好感度 {rel.get('affection')}"
+            )
+        for rel in self.db.list_character_relations():
+            relation_lines.append(
+                f"{rel.get('role_a_name') or '?'} ↔ {rel.get('role_b_name') or '?'}："
+                f"{rel.get('relation') or '未设置'}，好感度 {rel.get('affection')}"
+            )
+        existing_text = ft.Text(
+            "\n".join(relation_lines) if relation_lines else "暂无已保存关系",
+            size=12,
+            color=ft.Colors.BLUE_GREY_700,
+            max_lines=8,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
 
         def _refresh_first():
             if mode_value[0] == "user_ai":
@@ -1096,6 +1114,11 @@ class TaskApp:
                     relation_field,
                     affection_text,
                     affection_slider,
+                    ft.Divider(height=1),
+                    ft.Text("已保存关系", size=12,
+                            weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_GREY_500),
+                    existing_text,
                 ],
                 tight=True,
                 spacing=8,
