@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.10"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.11"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -956,6 +956,109 @@ class TaskApp:
             return
         self._show_role_card_editor(card)
 
+    def _build_relation_network(self, center_key):
+        import math
+        nodes = []
+        center_name = "中心"
+        if center_key.startswith("u"):
+            uid = int(center_key[1:])
+            card = self.db.get_user_card(uid)
+            center_name = card["name"] if card else "我"
+            for rel in self.db.list_role_relations():
+                if rel.get("user_card_id") == uid:
+                    nodes.append({
+                        "name": rel.get("role_name") or "角色",
+                        "relation": rel.get("relation") or "未设置",
+                        "affection": rel.get("affection"),
+                    })
+        else:
+            rid = int(center_key[1:])
+            card = self.db.get_role_card(rid)
+            center_name = card["name"] if card else "角色"
+            for rel in self.db.list_role_relations():
+                if rel.get("role_card_id") == rid:
+                    nodes.append({
+                        "name": rel.get("user_name") or "我",
+                        "relation": rel.get("relation") or "未设置",
+                        "affection": rel.get("affection"),
+                    })
+            for rel in self.db.list_character_relations():
+                if rel.get("role_card_id_a") == rid:
+                    nodes.append({
+                        "name": rel.get("role_b_name") or "角色",
+                        "relation": rel.get("relation") or "未设置",
+                        "affection": rel.get("affection"),
+                    })
+                elif rel.get("role_card_id_b") == rid:
+                    nodes.append({
+                        "name": rel.get("role_a_name") or "角色",
+                        "relation": rel.get("relation") or "未设置",
+                        "affection": rel.get("affection"),
+                    })
+        width, height = 340, 280
+        cx, cy = width / 2, height / 2
+        radius = 92
+        controls = []
+        for i, node in enumerate(nodes[:8]):
+            angle = -math.pi / 2 + 2 * math.pi * i / max(1, len(nodes[:8]))
+            nx = cx + math.cos(angle) * radius
+            ny = cy + math.sin(angle) * radius
+            dx, dy = nx - cx, ny - cy
+            length = max(10, math.hypot(dx, dy) - 24)
+            line_angle = math.atan2(dy, dx)
+            controls.append(ft.Container(
+                left=cx - length / 2,
+                top=cy - 1,
+                width=length,
+                height=2,
+                bgcolor=ft.Colors.BLUE_GREY_300,
+                rotate=line_angle,
+            ))
+            controls.append(ft.Container(
+                left=nx - 28,
+                top=ny - 28,
+                width=56,
+                height=56,
+                border_radius=28,
+                bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.BLUE_500),
+                alignment=ft.Alignment(0, 0),
+                content=ft.Text(
+                    node["name"][:2],
+                    size=14,
+                    weight=ft.FontWeight.BOLD,
+                    color=ft.Colors.BLUE_800,
+                ),
+            ))
+            controls.append(ft.Container(
+                left=nx - 56,
+                top=ny + 32,
+                width=112,
+                content=ft.Text(
+                    f"{node['name']}\n{node['relation']} · {node['affection']}",
+                    size=10,
+                    color=ft.Colors.BLUE_GREY_700,
+                    text_align=ft.TextAlign.CENTER,
+                    max_lines=3,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            ))
+        controls.append(ft.Container(
+            left=cx - 36,
+            top=cy - 36,
+            width=72,
+            height=72,
+            border_radius=36,
+            bgcolor=ft.Colors.BLUE_700,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Text(
+                center_name[:2],
+                size=16,
+                weight=ft.FontWeight.BOLD,
+                color=ft.Colors.WHITE,
+            ),
+        ))
+        return ft.Stack(controls, width=width, height=height)
+
     def _open_relation_manager(self):
         role_cards = self.db.list_role_cards()
         user_cards = self.db.list_user_cards()
@@ -981,24 +1084,28 @@ class TaskApp:
         affection_slider = ft.Slider(
             min=0, max=200, divisions=20, value=50, label="50"
         )
-        relation_lines = []
-        for rel in self.db.list_role_relations():
-            relation_lines.append(
-                f"{rel.get('user_name') or '我'} ↔ {rel.get('role_name') or '?'}："
-                f"{rel.get('relation') or '未设置'}，好感度 {rel.get('affection')}"
-            )
-        for rel in self.db.list_character_relations():
-            relation_lines.append(
-                f"{rel.get('role_a_name') or '?'} ↔ {rel.get('role_b_name') or '?'}："
-                f"{rel.get('relation') or '未设置'}，好感度 {rel.get('affection')}"
-            )
-        existing_text = ft.Text(
-            "\n".join(relation_lines) if relation_lines else "暂无已保存关系",
-            size=12,
-            color=ft.Colors.BLUE_GREY_700,
-            max_lines=8,
-            overflow=ft.TextOverflow.ELLIPSIS,
+        center_options = [
+            ft.dropdown.Option(key=f"u{u['id']}", text=f"我：{u['name']}")
+            for u in user_cards
+        ] + [
+            ft.dropdown.Option(key=f"r{r['id']}", text=f"角色：{r['name']}")
+            for r in role_cards
+        ]
+        center_dd = ft.Dropdown(
+            label="关系网络中心",
+            value=center_options[0].key if center_options else None,
+            options=center_options,
         )
+        network_container = ft.Container(
+            content=self._build_relation_network(center_dd.value),
+            height=300,
+        )
+
+        def _refresh_network(e):
+            network_container.content = self._build_relation_network(center_dd.value)
+            self.page.update()
+
+        center_dd.on_change = _refresh_network
 
         def _refresh_first():
             if mode_value[0] == "user_ai":
@@ -1108,20 +1215,18 @@ class TaskApp:
             title=ft.Text("关系管理"),
             content=ft.Column(
                 [
+                    center_dd,
+                    network_container,
                     type_seg,
                     first_dd,
                     second_dd,
                     relation_field,
                     affection_text,
                     affection_slider,
-                    ft.Divider(height=1),
-                    ft.Text("已保存关系", size=12,
-                            weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.BLUE_GREY_500),
-                    existing_text,
                 ],
                 tight=True,
                 spacing=8,
+                scroll=ft.ScrollMode.AUTO,
             ),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
