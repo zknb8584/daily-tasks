@@ -214,6 +214,16 @@ class Database:
                 )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS ai_drafts(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    card_type TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            c.execute(
                 """CREATE TABLE IF NOT EXISTS ai_worlds(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -286,11 +296,17 @@ class Database:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN world_id INTEGER")
             if "autonomy" not in card_cols:
                 c.execute("ALTER TABLE ai_role_cards ADD COLUMN autonomy INTEGER DEFAULT 50")
+            if "behavior" not in card_cols:
+                c.execute("ALTER TABLE ai_role_cards ADD COLUMN behavior TEXT DEFAULT '{}'")
+            if "active_speech_frequency" not in card_cols:
+                c.execute("ALTER TABLE ai_role_cards ADD COLUMN active_speech_frequency INTEGER DEFAULT 30")
             group_cols = [r["name"] for r in c.execute("PRAGMA table_info(ai_group_chats)")]
             if "current_scene" not in group_cols:
                 c.execute("ALTER TABLE ai_group_chats ADD COLUMN current_scene TEXT DEFAULT ''")
             if "user_card_id" not in group_cols:
                 c.execute("ALTER TABLE ai_group_chats ADD COLUMN user_card_id INTEGER")
+            if "suggestion_mode" not in group_cols:
+                c.execute("ALTER TABLE ai_group_chats ADD COLUMN suggestion_mode INTEGER DEFAULT 0")
 
     # ---------------- 增删改查 ----------------
     def add(self, parent_id, title, deadline="") -> int:
@@ -701,6 +717,16 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def export_world(self, world_id) -> dict:
+        world = self.get_world(world_id)
+        if not world:
+            return {}
+        return {
+            "app": "daily_tasks_world",
+            "world": world,
+            "role_cards": self.role_cards_by_world(world_id),
+        }
+
     # ---------------- AI 会话 ----------------
     def create_ai_session(self, skill_id: str, title: str, project_id=None,
                           role_card_id=None, user_card_id=None) -> int:
@@ -825,6 +851,60 @@ class Database:
                 (value, card_id),
             )
 
+    def get_role_behavior(self, card_id) -> dict:
+        card = self.get_role_card(card_id)
+        if not card:
+            return {}
+        try:
+            behavior = json.loads(card.get("behavior") or "{}")
+            return behavior if isinstance(behavior, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def save_role_behavior(self, card_id, behavior: dict):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_role_cards SET behavior=? WHERE id=?",
+                (json.dumps(behavior, ensure_ascii=False), card_id),
+            )
+
+    def set_role_speech_frequency(self, card_id, frequency):
+        value = max(0, min(100, int(frequency or 30)))
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_role_cards SET active_speech_frequency=? WHERE id=?",
+                (value, card_id),
+            )
+
+    # ---------------- AI 生成草稿 ----------------
+    def create_draft(self, name, content, card_type=""):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO ai_drafts(name,content,card_type,created_at,updated_at) "
+                "VALUES(?,?,?,?,?)",
+                (name.strip(), content.strip(), card_type, now, now),
+            )
+            return cur.lastrowid
+
+    def list_drafts(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ai_drafts ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_draft(self, draft_id):
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM ai_drafts WHERE id=?", (draft_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_draft(self, draft_id):
+        with self._conn() as c:
+            c.execute("DELETE FROM ai_drafts WHERE id=?", (draft_id,))
+
     def list_role_cards(self):
         with self._conn() as c:
             rows = c.execute(
@@ -908,6 +988,24 @@ class Database:
                 "relation=excluded.relation, affection=excluded.affection, "
                 "updated_at=excluded.updated_at",
                 (a, b, relation or "", int(affection or 50), now),
+            )
+
+    def delete_role_relation(self, user_card_id, role_card_id):
+        user_id = user_card_id or 0
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM ai_role_relations "
+                "WHERE user_card_id=? AND role_card_id=?",
+                (user_id, role_card_id),
+            )
+
+    def delete_character_relation(self, role_a_id, role_b_id):
+        a, b = sorted([role_a_id, role_b_id])
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM ai_character_relations "
+                "WHERE role_card_id_a=? AND role_card_id_b=?",
+                (a, b),
             )
 
     def list_ai_sessions(self):
@@ -1094,6 +1192,21 @@ class Database:
             c.execute(
                 "UPDATE ai_group_chats SET current_scene=? WHERE id=?",
                 (scene.strip(), group_id),
+            )
+
+    def get_group_suggestion_mode(self, group_id) -> bool:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT suggestion_mode FROM ai_group_chats WHERE id=?",
+                (group_id,),
+            ).fetchone()
+        return bool(row and row["suggestion_mode"])
+
+    def set_group_suggestion_mode(self, group_id, enabled: bool):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE ai_group_chats SET suggestion_mode=? WHERE id=?",
+                (1 if enabled else 0, group_id),
             )
 
     # ---------------- 子树快照 / 恢复（滑动删除撤销） ----------------

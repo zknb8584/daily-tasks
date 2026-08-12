@@ -569,7 +569,9 @@ def main():
     assert all(s["role_card_id"] != card_id for s in db.list_ai_sessions())
 
     app._begin_roleplay(card_id, None, "同学", "30 友好")
-    pair = db.get_role_relation(0, card_id)
+    auto_sess = db.get_ai_session(app._ai_session_id)
+    auto_user_id = auto_sess["user_card_id"]
+    pair = db.get_role_relation(auto_user_id, card_id)
     assert pair["relation"] == "同学"
     assert pair["affection"] == "30 友好"
     user_card_id = db.create_user_card(
@@ -586,6 +588,14 @@ def main():
     db.set_role_autonomy(role_a_id, 80)
     assert db.get_role_card(role_a_id)["autonomy"] == 80
     assert "自主性：高" in ai_client.build_autonomy_rule(80)
+    db.save_role_behavior(role_a_id, {"interaction": "平等讨论"})
+    assert db.get_role_behavior(role_a_id)["interaction"] == "平等讨论"
+    db.set_role_speech_frequency(role_a_id, 75)
+    assert db.get_role_card(role_a_id)["active_speech_frequency"] == 75
+    draft_id = db.create_draft("草稿A", "[核心]\n名字：草稿A")
+    assert any(d["name"] == "草稿A" for d in db.list_drafts())
+    db.delete_draft(draft_id)
+    assert not any(d["name"] == "草稿A" for d in db.list_drafts())
 
     # ---- 导入 V2 角色卡 JSON：system_prompt / post_history / character_book ----
     v2_file = os.path.join(tmp, "v2_role.json")
