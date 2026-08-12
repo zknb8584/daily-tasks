@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.6"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.7"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -183,6 +183,8 @@ class TaskApp:
         self._roleplay_card_view = "ai" # 角色卡页：ai/user
         self._chat_search = ""          # 角色扮演聊天搜索
         self._chat_search_field = None
+        self._card_search = ""          # 角色卡页搜索
+        self._card_search_field = None
         self._ai_session_id = None      # 当前打开的 AI 会话 id
         self._ai_input = None           # 对话输入框（保持引用避免失焦）
         self._ai_busy = False           # 是否正在等待 AI 回复
@@ -600,6 +602,26 @@ class TaskApp:
                     )
                     self._render()
                     await asyncio.sleep(1)
+            for _ in range(3):
+                if self._proactive_cancel:
+                    break
+                extra = await self._group_reply(
+                    group["id"], "（角色主动发言）"
+                )
+                if not extra:
+                    break
+                for role_card_id, role_name, clean in extra:
+                    if self._proactive_cancel:
+                        break
+                    if clean:
+                        self.db.append_group_message(
+                            group["id"], "assistant", clean,
+                            role_name=role_name, role_card_id=role_card_id,
+                        )
+                        self._render()
+                        await asyncio.sleep(1)
+                if self._proactive_cancel:
+                    break
         finally:
             self._proactive_running.discard(key)
             if self._speaking_role and self._speaking_role[0] == key:
@@ -699,7 +721,36 @@ class TaskApp:
         role_cards = self.db.list_role_cards()
         user_cards = self.db.list_user_cards()
         drafts = self.db.list_drafts()
+        if self._card_search_field is None:
+            self._card_search_field = ft.TextField(
+                label="搜索角色卡 / 人设 / 草稿",
+                value=self._card_search,
+                prefix_icon=ft.Icons.SEARCH,
+                on_change=lambda e: (
+                    setattr(self, "_card_search", e.control.value or ""),
+                    self._render(),
+                ),
+            )
+        else:
+            self._card_search_field.value = self._card_search
+        query = self._card_search.strip()
+        role_cards = [
+            c for c in role_cards
+            if not query or query in c["name"] or query in (c.get("content") or "")
+        ]
+        user_cards = [
+            u for u in user_cards
+            if not query or query in u["name"] or query in u["content"]
+        ]
+        drafts = [
+            d for d in drafts
+            if not query or query in d["name"] or query in d["content"]
+        ]
         controls = [
+            ft.Container(
+                padding=ft.Padding(left=12, right=12, top=8, bottom=2),
+                content=self._card_search_field,
+            ),
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Row(
@@ -2514,7 +2565,7 @@ class TaskApp:
                              world_dd, dlg):
         world_id = int(world_dd.value) if world_dd.value else None
         content = content_field.value or ""
-        if world_id:
+        if world_id and not parse_role_card(content).get("世界观"):
             content = self._attach_world_to_content(content, world_id)
         self.db.update_role_card(
             card_id,
@@ -2524,6 +2575,50 @@ class TaskApp:
         )
         self.page.pop_dialog()
         self._toast("角色卡已保存")
+        world = self.db.get_world(world_id) if world_id else None
+        section = parse_role_card(content).get("世界观", "")
+        if world and section:
+            current = (world["name"] + "\n" + world["content"]).strip()
+            if section != current:
+                self._prompt_world_sync(world_id, content)
+                return
+        self._return_to_roleplay_context()
+
+    def _prompt_world_sync(self, world_id, content):
+        world = self.db.get_world(world_id)
+        if not world:
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("同步世界观"),
+            content=ft.Text(
+                f"角色卡里的世界观和「{world['name']}」不同，"
+                "是否同步到共享世界观？这会影响所有绑定该世界观的角色。",
+                size=13,
+            ),
+            actions=[
+                ft.TextButton("不同步", on_click=lambda e: (
+                    self.page.pop_dialog(), self._return_to_roleplay_context()
+                )),
+                ft.FilledButton(
+                    content="同步",
+                    on_click=lambda e: self._apply_world_sync(
+                        world_id, content
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _apply_world_sync(self, world_id, content):
+        section = parse_role_card(content).get("世界观", "")
+        lines = section.splitlines()
+        name = lines[0].strip() if lines else "世界观"
+        body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+        self.db.update_world(world_id, name=name, content=body)
+        self.page.pop_dialog()
+        self._toast("世界观已同步")
         self._return_to_roleplay_context()
 
     def _open_world_manager(self, dlg=None):
