@@ -62,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.8"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.9"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -2964,9 +2964,8 @@ class TaskApp:
         if not user_card_id and (relation or affection):
             user_card_id = self.db.create_user_card(
                 f"我 · 与「{card['name']}」",
-                f"身份/关系：{relation or ''}\n"
-                f"初始好感度：{affection or ''}\n"
-                f"来自对话：与「{card['name']}」第一次聊天时生成",
+                f"自动生成：与「{card['name']}」第一次聊天时创建。"
+                "身份关系和好感度只保存在对应关系记录里。",
             )
         # 每个角色一个永久聊天框：直接继续已有 roleplay 会话
         existing = None

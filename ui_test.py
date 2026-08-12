@@ -571,6 +571,9 @@ def main():
     app._begin_roleplay(card_id, None, "同学", "30 友好")
     auto_sess = db.get_ai_session(app._ai_session_id)
     auto_user_id = auto_sess["user_card_id"]
+    auto_user_card = db.get_user_card(auto_user_id)
+    assert "身份/关系" not in auto_user_card["content"]
+    assert "自动生成" in auto_user_card["content"]
     pair = db.get_role_relation(auto_user_id, card_id)
     assert pair["relation"] == "同学"
     assert pair["affection"] == "30 友好"
