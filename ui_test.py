@@ -457,6 +457,22 @@ def main():
         1, False,
     )
     assert app._swipe_armed == {}
+    reverse_dir = ft.DismissDirection.START_TO_END
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=fake_dir, progress=0.3),
+        2, False,
+    )
+    assert app._swipe_armed[(2, str(fake_dir))] is True
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=reverse_dir, progress=0.1),
+        2, False,
+    )
+    assert app._swipe_armed == {}
+    app._on_swipe_update(
+        types.SimpleNamespace(direction=reverse_dir, progress=0.3),
+        2, False,
+    )
+    assert app._swipe_armed == {}
 
     # ---- 预览按钮：最后一条无大纲时隐藏，有大纲时显示 ----
     db.append_ai_message(sid, "assistant", "好的，明白了。")
