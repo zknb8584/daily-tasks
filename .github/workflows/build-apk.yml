@@ -43,6 +43,19 @@ jobs:
           pip install -r requirements.txt
           pip install flet-cli==0.86.5
 
+      - name: Fetch Flet Python manifest
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -fL --retry 5 --retry-all-errors \
+              -o python_manifest.json \
+              "https://github.com/flet-dev/python-build/releases/download/20260730/manifest.json"; then
+              break
+            fi
+            echo "retry $i"
+            sleep 5
+          done
+          test -s python_manifest.json
+
       - name: Run UI smoke test
         run: python ui_test.py
 
@@ -50,6 +63,8 @@ jobs:
         run: yes | flutter doctor --android-licenses || true
 
       - name: Build APK
+        env:
+          FLET_PYTHON_BUILD_MANIFEST: ${{ github.workspace }}/python_manifest.json
         run: |
           flet build apk \
             --project daily_tasks \
