@@ -25,6 +25,7 @@ import calendar as _cal
 import asyncio
 import datetime as dt
 import io
+import json
 import os
 import random
 import sys
@@ -61,7 +62,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.1"      # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.2"      # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -1038,12 +1039,79 @@ class TaskApp:
             ),
             actions=[
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton(
+                    "AI 自动生成",
+                    on_click=lambda e: self.page.run_task(
+                        self._auto_generate_ai_relation,
+                        first_dd, second_dd, relation_field, affection_slider,
+                        affection_text,
+                    ),
+                ),
                 ft.TextButton("删除关系", on_click=_delete_relation),
                 ft.FilledButton(content="保存关系", on_click=_save),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.show_dialog(dlg)
+
+    async def _auto_generate_ai_relation(
+            self, first_dd, second_dd, relation_field,
+            affection_slider, affection_text):
+        if not first_dd.value or not second_dd.value:
+            self._toast("请选择两张卡")
+            return
+        role_a = self.db.get_role_card(int(first_dd.value))
+        role_b = self.db.get_role_card(int(second_dd.value))
+        if not role_a or not role_b:
+            self._toast("角色卡不存在")
+            return
+        cfg = self.db.get_ai_config()
+        system = (
+            "你是角色关系设定助手。根据两张角色卡和共同世界观，"
+            "生成他们之间可能的关系和好感度。只输出两行：\n"
+            "关系=...\n好感度=0到200的整数"
+        )
+        payload = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": (
+                f"角色A：{role_a['name']}\n{role_a['content'][:500]}\n\n"
+                f"角色B：{role_b['name']}\n{role_b['content'][:500]}"
+            )},
+        ]
+        reply = await asyncio.to_thread(
+            chat_completion,
+            cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+            payload,
+        )
+        relation = ""
+        affection = 50
+        for line in reply.splitlines():
+            if line.startswith("关系=") or line.startswith("关系："):
+                relation = line.split("=", 1)[-1].split("：", 1)[-1].strip()
+            elif line.startswith("好感度=") or line.startswith("好感度："):
+                try:
+                    affection = max(0, min(200, int(
+                        line.split("=", 1)[-1].split("：", 1)[-1].strip()
+                    )))
+                except ValueError:
+                    pass
+        relation_field.value = relation
+        affection_slider.value = affection
+        if affection <= 20:
+            label = "陌生 / 疏远"
+        elif affection <= 50:
+            label = "中立 / 普通认识"
+        elif affection <= 80:
+            label = "友好"
+        elif affection <= 120:
+            label = "亲近"
+        elif affection <= 160:
+            label = "信赖"
+        else:
+            label = "亲密 / 依恋"
+        affection_text.value = f"{affection} · {label}"
+        self._toast("AI 已生成关系建议，可确认或修改")
+        self.page.update()
 
     def _render_ai_center(self):
         controls = [
@@ -1296,6 +1364,10 @@ class TaskApp:
                 ],
             ],
         )
+        auto_relations = ft.Checkbox(
+            label="自动生成群内关系",
+            value=False,
+        )
         checks = [
             (card["id"], ft.Checkbox(label=card["name"], value=False))
             for card in cards[:20]
@@ -1304,7 +1376,8 @@ class TaskApp:
             modal=True,
             title=ft.Text("新建群聊"),
             content=ft.Column(
-                [title_field, user_dd, *[cb for _, cb in checks]],
+                [title_field, user_dd, auto_relations,
+                 *[cb for _, cb in checks]],
                 tight=True,
                 spacing=8,
                 scroll=ft.ScrollMode.AUTO,
@@ -1314,7 +1387,7 @@ class TaskApp:
                 ft.FilledButton(
                     content="创建群聊",
                     on_click=lambda e: self._create_group_chat(
-                        title_field, user_dd, checks, dlg
+                        title_field, user_dd, auto_relations, checks, dlg
                     ),
                 ),
             ],
@@ -1322,7 +1395,8 @@ class TaskApp:
         )
         self.page.show_dialog(dlg)
 
-    def _create_group_chat(self, title_field, user_dd, checks, dlg):
+    def _create_group_chat(self, title_field, user_dd, auto_relations,
+                           checks, dlg):
         selected = [card_id for card_id, cb in checks if cb.value]
         if not 2 <= len(selected) <= 4:
             self._toast("请选择 2~4 个角色")
@@ -1333,6 +1407,109 @@ class TaskApp:
         for card_id in selected:
             self.db.add_group_member(group_id, card_id)
         self.page.pop_dialog()
+        if auto_relations.value:
+            runner = getattr(self.page, "run_task", None)
+            if runner:
+                runner(self._preview_group_relations, group_id)
+                return
+        self._open_group_chat(group_id)
+
+    async def _preview_group_relations(self, group_id):
+        group = self.db.get_group_chat(group_id)
+        members = self.db.group_members(group_id)
+        if not group or len(members) < 2:
+            self._open_group_chat(group_id)
+            return
+        cfg = self.db.get_ai_config()
+        pending = []
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                if self.db.get_character_relation(a["id"], b["id"]):
+                    continue
+                system = (
+                    "你是角色关系设定助手。根据两张角色卡和世界观，"
+                    "输出一行：关系=...，好感度=0到200的整数"
+                )
+                payload = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": (
+                        f"角色A：{a['name']}\n{a['content'][:400]}\n\n"
+                        f"角色B：{b['name']}\n{b['content'][:400]}"
+                    )},
+                ]
+                reply = await asyncio.to_thread(
+                    chat_completion,
+                    cfg["ai_base_url"], cfg["ai_api_key"], cfg["ai_model"],
+                    payload,
+                )
+                relation = ""
+                affection = 50
+                for line in reply.splitlines():
+                    if line.startswith("关系=") or line.startswith("关系："):
+                        relation = line.split("=", 1)[-1].split("：", 1)[-1].strip()
+                    elif line.startswith("好感度=") or line.startswith("好感度："):
+                        try:
+                            affection = max(0, min(200, int(
+                                line.split("=", 1)[-1].split("：", 1)[-1].strip()
+                            )))
+                        except ValueError:
+                            pass
+                pending.append({
+                    "kind": "ai", "a": a["id"], "b": b["id"],
+                    "name": f"{a['name']} ↔ {b['name']}",
+                    "relation": relation, "affection": affection,
+                })
+        if group.get("user_card_id"):
+            user_card = self.db.get_user_card(group["user_card_id"])
+            for m in members:
+                if self.db.get_role_relation(group["user_card_id"], m["id"]):
+                    continue
+                pending.append({
+                    "kind": "user", "user": group["user_card_id"], "role": m["id"],
+                    "name": f"{user_card['name'] if user_card else '我'} ↔ {m['name']}",
+                    "relation": "认识", "affection": 50,
+                })
+        if not pending:
+            self._toast("群内关系已齐全")
+            self._open_group_chat(group_id)
+            return
+        preview = "\n".join(
+            f"{p['name']}：{p['relation']}，好感度 {p['affection']}"
+            for p in pending
+        )
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("自动生成群内关系"),
+            content=ft.Text(preview, size=13, selectable=True),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: (
+                    self.page.pop_dialog(), self._open_group_chat(group_id)
+                )),
+                ft.FilledButton(
+                    content="确认保存",
+                    on_click=lambda e: self._save_group_relations(
+                        group_id, pending
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+
+    def _save_group_relations(self, group_id, pending):
+        for p in pending:
+            if p["kind"] == "ai":
+                self.db.save_character_relation(
+                    p["a"], p["b"], p["relation"], p["affection"]
+                )
+            else:
+                self.db.save_role_relation(
+                    p["user"], p["role"],
+                    p["relation"], str(p["affection"]),
+                )
+        self.page.pop_dialog()
+        self._toast("群内关系已保存")
         self._open_group_chat(group_id)
 
     def _confirm_delete_group(self, group_id):
@@ -2365,6 +2542,19 @@ class TaskApp:
                         int(world_dd.value) if world_dd.value else None
                     ),
                 ),
+                ft.TextButton(
+                    "导出",
+                    on_click=lambda e: self.page.run_task(
+                        self._export_world,
+                        int(world_dd.value) if world_dd.value else None,
+                    ),
+                ),
+                ft.TextButton(
+                    "导入",
+                    on_click=lambda e: self.page.run_task(
+                        self._import_world_file
+                    ),
+                ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
@@ -2436,6 +2626,83 @@ class TaskApp:
             self._open_world_manager()
             return
         self._toast("世界观已删除")
+        self._open_world_manager()
+
+    async def _export_world(self, world_id):
+        if not world_id:
+            self._toast("请先选择世界观")
+            return
+        world = self.db.get_world(world_id)
+        data = json.dumps(
+            self.db.export_world(world_id),
+            ensure_ascii=False, indent=2,
+        ).encode("utf-8")
+        self.page.pop_dialog()
+        try:
+            path = await self.file_picker.save_file(
+                dialog_title="导出世界观",
+                file_name=f"{world['name']}.json",
+                allowed_extensions=["json"],
+                src_bytes=data,
+            )
+        except Exception as ex:
+            self._toast(f"导出失败：{ex}")
+            self._open_world_manager()
+            return
+        if not path:
+            self._toast("已取消")
+            self._open_world_manager()
+            return
+        try:
+            if not (os.path.exists(path) and os.path.getsize(path) == len(data)):
+                with open(path, "wb") as f:
+                    f.write(data)
+        except Exception:
+            pass
+        self._toast("世界观已导出")
+        self._open_world_manager()
+
+    async def _import_world_file(self):
+        self.page.pop_dialog()
+        try:
+            files = await self.file_picker.pick_files(
+                dialog_title="导入世界观",
+                allowed_extensions=["json", "txt"],
+            )
+        except Exception as ex:
+            self._toast(f"选择失败：{ex}")
+            self._open_world_manager()
+            return
+        if not files:
+            self._toast("已取消")
+            self._open_world_manager()
+            return
+        fp = files[0]
+        try:
+            text = None
+            b = getattr(fp, "bytes", None)
+            if b:
+                text = b.decode("utf-8", "replace")
+            elif getattr(fp, "path", None):
+                with open(fp.path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            if not text:
+                raise ValueError("文件为空")
+            name = getattr(fp, "name", None) or "导入世界观"
+            content = text
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    w = data.get("world") or data
+                    name = str(w.get("name") or name)
+                    content = str(w.get("content") or content)
+            except (TypeError, ValueError):
+                pass
+            name = name.rsplit(".", 1)[0] if "." in name else name
+            self.db.create_world(name, content)
+            self._toast(f"世界观已导入：{name}")
+        except Exception as ex:
+            self._toast(f"导入失败：{ex}")
         self._open_world_manager()
 
     def _open_user_card_manager(self):
