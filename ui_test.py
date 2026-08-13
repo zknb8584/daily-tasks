@@ -781,6 +781,28 @@ def main():
     rr, cr = db.relation_counts()
     assert isinstance(rr, int) and isinstance(cr, int)
 
+    # ---- 统一关系门面：relations_for / set_relation / delete_relation 正确路由 ----
+    fa = db.create_role_card("门面A", "[核心]\n名字：门面A\n")
+    fb = db.create_role_card("门面B", "[核心]\n名字：门面B\n")
+    fu = db.create_user_card("门面我", "人设")
+    # set_relation：一 u 一 r → 用户↔角色；两 r → 角色↔角色
+    db.set_relation(f"u{fu}", f"r{fa}", "恋人", 120)
+    db.set_relation(f"r{fa}", f"r{fb}", "同门", 60)
+    assert db.get_role_relation(fu, fa)["relation"] == "恋人"
+    assert db.get_character_relation(fa, fb)["relation"] == "同门"
+    # relations_for：r 中心同时返回用户边和角色边；u 中心返回角色边
+    edges_fa = db.relations_for(f"r{fa}")
+    assert any(e["other"] == f"u{fu}" and e["relation"] == "恋人" for e in edges_fa), edges_fa
+    assert any(e["other"] == f"r{fb}" and e["relation"] == "同门" for e in edges_fa), edges_fa
+    edges_fu = db.relations_for(f"u{fu}")
+    assert any(e["other"] == f"r{fa}" and e["relation"] == "恋人" for e in edges_fu), edges_fu
+    # delete_relation 按类型路由
+    db.delete_relation(f"r{fa}", f"r{fb}")
+    assert db.get_character_relation(fa, fb) is None
+    assert db.get_role_relation(fu, fa)["relation"] == "恋人"   # 用户边不受影响
+    db.delete_relation(f"u{fu}", f"r{fa}")
+    assert db.get_role_relation(fu, fa) is None
+
     db.set_role_autonomy(role_a_id, 80)
     assert db.get_role_card(role_a_id)["autonomy"] == 80
     assert "自主性：高" in ai_client.build_autonomy_rule(80)

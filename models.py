@@ -1029,6 +1029,66 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ---------------- 统一关系门面（唯一入口） ----------------
+    def relations_for(self, key):
+        """返回与节点 key（'u{id}' 或 'r{id}'）相邻的所有关系边。
+
+        所有界面（关系图/聊天/群聊/关系管理）都从这里读，保证同一份数据。
+        每条边：{"other": "r3"/"u2", "relation": str, "affection": str/int}
+        """
+        out = []
+        if key.startswith("u"):
+            uid = int(key[1:])
+            for rel in self.list_role_relations():
+                if rel.get("user_card_id") == uid:
+                    out.append({
+                        "other": f"r{rel['role_card_id']}",
+                        "relation": rel.get("relation", "") or "",
+                        "affection": rel.get("affection", ""),
+                    })
+        else:
+            rid = int(key[1:])
+            for rel in self.list_role_relations():
+                if rel.get("role_card_id") == rid:
+                    out.append({
+                        "other": f"u{rel.get('user_card_id') or 0}",
+                        "relation": rel.get("relation", "") or "",
+                        "affection": rel.get("affection", ""),
+                    })
+            for rel in self.list_character_relations():
+                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
+                if a == rid:
+                    out.append({"other": f"r{b}", "relation": rel.get("relation", "") or "",
+                                "affection": rel.get("affection")})
+                elif b == rid:
+                    out.append({"other": f"r{a}", "relation": rel.get("relation", "") or "",
+                                "affection": rel.get("affection")})
+        return out
+
+    def set_relation(self, a_key, b_key, relation="", affection=50):
+        """按节点类型路由写关系：一 u 一 r → 用户↔角色；两 r → 角色↔角色；两 u → 忽略。"""
+        a_user = a_key.startswith("u")
+        b_user = b_key.startswith("u")
+        if a_user == b_user:
+            if not a_user:
+                self.save_character_relation(int(a_key[1:]), int(b_key[1:]), relation, affection)
+            return
+        u_key = a_key if a_user else b_key
+        r_key = b_key if a_user else a_key
+        self.save_role_relation(int(u_key[1:]), int(r_key[1:]), relation, affection)
+
+    def delete_relation(self, a_key, b_key):
+        """按节点类型路由删除关系。"""
+        a_user = a_key.startswith("u")
+        b_user = b_key.startswith("u")
+        if a_user == b_user:
+            if not a_user:
+                self.delete_character_relation(int(a_key[1:]), int(b_key[1:]))
+            return
+        u_key = a_key if a_user else b_key
+        r_key = b_key if a_user else a_key
+        self.delete_role_relation(int(u_key[1:]), int(r_key[1:]))
+
     def repair_orphan_relations(self):
         """把关系重连到「最新一张同名卡」（重复导入后 id 变了也能自动找回）。
 

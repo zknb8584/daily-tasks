@@ -63,7 +63,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.22"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.23"     # 每次构建手动递增，便于确认手机上是哪个包
 
 
 def _affection_int(value):
@@ -722,12 +722,7 @@ class TaskApp:
     def _confirm_delete_relation(self, center, other):
         def _do(e):
             self.page.pop_dialog()
-            if center.startswith("u") or other.startswith("u"):
-                uid = int((center if center.startswith("u") else other)[1:])
-                rid = int((other if other.startswith("r") else center)[1:])
-                self.db.delete_role_relation(uid, rid)
-            else:
-                self.db.delete_character_relation(int(center[1:]), int(other[1:]))
+            self.db.delete_relation(center, other)   # 统一门面按类型路由
             self._render()
 
         dlg = ft.AlertDialog(
@@ -1224,108 +1219,46 @@ class TaskApp:
         self._show_role_card_editor(card)
 
     def _relation_network_data(self, center_key):
-        role_cards = self.db.list_role_cards()
-        user_cards = self.db.list_user_cards()
-        roles = {r["id"]: r for r in role_cards}
-        users = {u["id"]: u for u in user_cards}
+        """关系图数据 = 关系门面的纯投影（数据库的唯一事实源）。
+
+        只取中心的一阶直接关系；不再手工遍历两张表 + 过滤。
+        """
+        role_cards = {r["id"]: r for r in self.db.list_role_cards()}
+        user_cards = {u["id"]: u for u in self.db.list_user_cards()}
         nodes = {}
         edges = []
-        seen_edges = set()
 
-        def add_node(key, name, kind, card_id):
-            nodes[key] = {
-                "key": key,
-                "name": name or ("我" if kind == "user" else "角色"),
-                "kind": kind,
-                "id": card_id,
-            }
+        def add_node(key):
+            if key in nodes:
+                return
+            if key.startswith("u"):
+                uid = int(key[1:])
+                nodes[key] = {
+                    "key": key,
+                    "name": (user_cards.get(uid) or {}).get("name") or "我",
+                    "kind": "user",
+                    "id": uid,
+                }
+            else:
+                rid = int(key[1:])
+                nodes[key] = {
+                    "key": key,
+                    "name": (role_cards.get(rid) or {}).get("name") or "角色",
+                    "kind": "role",
+                    "id": rid,
+                }
 
-        def add_edge(a, b, relation, affection):
-            if a == b:
-                return
-            pair = tuple(sorted((a, b)))
-            if pair in seen_edges:
-                return
-            seen_edges.add(pair)
+        add_node(center_key)
+        center_name = nodes[center_key]["name"]
+        for rel in self.db.relations_for(center_key):
+            other = rel["other"]
+            add_node(other)
             edges.append({
-                "source": pair[0],
-                "target": pair[1],
-                "relation": relation or "",
-                "affection": affection,
+                "source": center_key,
+                "target": other,
+                "relation": rel.get("relation") or "",
+                "affection": rel.get("affection"),
             })
-
-        if center_key.startswith("u"):
-            uid = int(center_key[1:])
-            center_name = (users.get(uid) or {}).get("name") or "我"
-            add_node(center_key, center_name, "user", uid)
-            related_roles = set()
-            for rel in self.db.list_role_relations():
-                if rel.get("user_card_id") != uid:
-                    continue
-                rid = rel.get("role_card_id")
-                if not rid:
-                    continue
-                related_roles.add(rid)
-                rkey = f"r{rid}"
-                rname = (roles.get(rid) or {}).get("name") or (
-                    rel.get("role_name") or "角色"
-                )
-                add_node(rkey, rname, "role", rid)
-                add_edge(
-                    center_key, rkey,
-                    rel.get("relation"), rel.get("affection"),
-                )
-            for rel in self.db.list_character_relations():
-                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
-                if a in related_roles and b in related_roles:
-                    add_edge(
-                        f"r{a}", f"r{b}",
-                        rel.get("relation"), rel.get("affection"),
-                    )
-        else:
-            rid = int(center_key[1:])
-            center_name = (roles.get(rid) or {}).get("name") or "角色"
-            add_node(center_key, center_name, "role", rid)
-            related_roles = {rid}
-            for rel in self.db.list_role_relations():
-                if rel.get("role_card_id") != rid:
-                    continue
-                uid = rel.get("user_card_id") or 0
-                ukey = f"u{uid}"
-                uname = (users.get(uid) or {}).get("name") or (
-                    rel.get("user_name") or "我"
-                )
-                add_node(ukey, uname, "user", uid)
-                add_edge(
-                    center_key, ukey,
-                    rel.get("relation"), rel.get("affection"),
-                )
-            for rel in self.db.list_character_relations():
-                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
-                if a == rid:
-                    other = b
-                elif b == rid:
-                    other = a
-                else:
-                    continue
-                related_roles.add(other)
-                okey = f"r{other}"
-                oname = (roles.get(other) or {}).get("name") or (
-                    rel.get("role_b_name") if other == b
-                    else rel.get("role_a_name")
-                ) or "角色"
-                add_node(okey, oname, "role", other)
-                add_edge(
-                    center_key, okey,
-                    rel.get("relation"), rel.get("affection"),
-                )
-            for rel in self.db.list_character_relations():
-                a, b = rel.get("role_card_id_a"), rel.get("role_card_id_b")
-                if a in related_roles and b in related_roles:
-                    add_edge(
-                        f"r{a}", f"r{b}",
-                        rel.get("relation"), rel.get("affection"),
-                    )
         return nodes, edges, center_name
 
 
