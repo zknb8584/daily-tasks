@@ -1001,6 +1001,57 @@ def main():
     )
     assert any(c["name"] == "拷问角色" for c in db.list_role_cards())
 
+    # ---- 关系生成：user↔AI 模式读用户人设卡；提示词带去《天气之子》护栏 ----
+    gen_uc = db.create_user_card("生成测试人设", "冷静的图书管理员")
+    gen_rc = db.create_role_card("生成测试角色", "[核心]\n名字：生成测试角色\n人设：社区图书管理员")
+    orig_cc = appmod.chat_completion
+    gen_payloads = []
+    appmod.chat_completion = lambda *a, **k: (
+        gen_payloads.append(a[3]) or "关系=认识\n好感度=60"
+    )
+    asyncio.run(app._auto_generate_ai_relation(
+        types.SimpleNamespace(value=str(gen_uc)),
+        types.SimpleNamespace(value=str(gen_rc)),
+        types.SimpleNamespace(value=""),
+        types.SimpleNamespace(value=50),
+        types.SimpleNamespace(value=""),
+        "user_ai",
+    ))
+    appmod.chat_completion = orig_cc
+    assert gen_payloads, "应该已经调用 chat_completion"
+    sys_prompt = gen_payloads[0][0]["content"]
+    assert "《天气之子》" in sys_prompt and "无关" in sys_prompt
+    user_msg = gen_payloads[0][1]["content"]
+    assert "用户人设卡" in user_msg and "生成测试人设" in user_msg
+
+    # ---- 备份 roundtrip：角色卡 state/人设/草稿/关系/群聊 存活，备份不含 API key ----
+    rt = tempfile.mkdtemp()
+    rdb = Database(os.path.join(rt, "rt.db"))
+    rdb.set_ai_config(base_url="https://x", model="m", api_key="sk-secret")
+    w = rdb.create_world("测试世界", "海边小镇设定")
+    rc = rdb.create_role_card("测试角色", "[核心]\n名字：测试角色\n", world_id=w)
+    rdb.save_role_card_state(rc, {"好感度": "88", "重要记忆": "一起看过海"})
+    uc = rdb.create_user_card("我的人设", "内向观察者")
+    rdb.create_draft("草稿卡", "未完成角色卡", "ai")
+    rdb.save_role_relation(uc, rc, "旧识", "70")
+    rc2b = rdb.create_role_card("测试角色2", "[核心]\n名字：测试角色2\n")
+    rdb.save_character_relation(rc, rc2b, "同僚", 60)
+    gid = rdb.create_group_chat("测试群聊", user_card_id=uc)
+    rdb.add_group_member(gid, rc)
+    blob = rdb.export()
+    assert "sk-secret" not in blob                     # 备份绝不包含 API key
+    assert "一起看过海" in blob                         # 重要记忆（state）被导出
+    rdb2 = Database(os.path.join(rt, "rt2.db"))
+    g_keep = rdb2.create_group_chat("导入前已有群聊")    # 导入不应清掉备份外的对话历史
+    rdb2.import_json(blob)
+    rc2n = next(c for c in rdb2.list_role_cards() if c["name"] == "测试角色")
+    st = rdb2.role_card_state(rc2n["id"])
+    assert st.get("好感度") == "88" and "一起看过海" in st.get("重要记忆", "")
+    assert any(c["name"] == "我的人设" for c in rdb2.list_user_cards())
+    assert len(rdb2.list_drafts()) == 1
+    assert len(rdb2.list_character_relations()) == 1
+    assert any(g["id"] == g_keep for g in rdb2.list_group_chats())  # 已有群聊不被误删
+
     print("UI TEST OK")
 
 

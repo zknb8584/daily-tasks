@@ -1352,26 +1352,49 @@ class Database:
         self.set_setting("bg_image", "")
 
     # ---------------- 备份 ----------------
+    # AI 内容表（备份 key → 表名）。群聊/会话/消息属于对话历史，不入备份。
+    AI_TABLE_KEYS = {
+        "role_cards": "ai_role_cards",
+        "worlds": "ai_worlds",
+        "user_cards": "ai_user_cards",
+        "drafts": "ai_drafts",
+        "role_relations": "ai_role_relations",
+        "character_relations": "ai_character_relations",
+    }
+
+    def _replace_table(self, c, table, rows):
+        """整体替换一张表：DELETE 后按行重建，保留原始 id，只插备份里有的列。"""
+        c.execute(f"DELETE FROM {table}")
+        if not rows:
+            return
+        cols = [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
+        for row in rows:
+            keys = [k for k in row if k in cols]
+            if not keys:
+                continue
+            sql = (
+                f"INSERT INTO {table}({','.join(keys)}) "
+                f"VALUES({','.join('?' * len(keys))})"
+            )
+            c.execute(sql, [row[k] for k in keys])
+
     def export(self) -> str:
         with self._conn() as c:
             items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY id")]
             tags = [dict(r) for r in c.execute("SELECT * FROM tags ORDER BY id")]
-            role_cards = [
-                dict(r) for r in c.execute(
-                    "SELECT id,name,content,world_id,created_at "
-                    "FROM ai_role_cards ORDER BY id"
-                )
-            ]
-            worlds = [dict(r) for r in c.execute("SELECT * FROM ai_worlds ORDER BY id")]
+            ai = {}
+            for key, table in self.AI_TABLE_KEYS.items():
+                ai[key] = [
+                    dict(r) for r in c.execute(f"SELECT * FROM {table} ORDER BY id")
+                ]
         return json.dumps(
             {
                 "app": "daily_tasks",
-                "version": 3,
+                "version": 4,
                 "exported_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "items": items,
                 "tags": tags,
-                "role_cards": role_cards,
-                "worlds": worlds,
+                **ai,
             },
             ensure_ascii=False,
             indent=2,
@@ -1408,38 +1431,11 @@ class Database:
                         it.get("repeat_interval", 0),
                     ),
                 )
-            if "role_cards" in data or "worlds" in data:
-                c.execute("DELETE FROM ai_group_messages")
-                c.execute("DELETE FROM ai_group_chats")
-                c.execute("DELETE FROM ai_group_members")
-                c.execute("DELETE FROM ai_role_cards")
-                c.execute("DELETE FROM ai_worlds")
-                for w in data.get("worlds", []):
-                    c.execute(
-                        "INSERT INTO ai_worlds(id,name,content,created_at,updated_at) "
-                        "VALUES(?,?,?,?,?)",
-                        (
-                            w["id"],
-                            w.get("name", ""),
-                            w.get("content", ""),
-                            w.get("created_at", ""),
-                            w.get("updated_at", ""),
-                        ),
-                    )
-                for r in data.get("role_cards", []):
-                    c.execute(
-                        "INSERT INTO ai_role_cards("
-                        "id,name,content,world_id,state,created_at) "
-                        "VALUES(?,?,?,?,?,?)",
-                        (
-                            r["id"],
-                            r.get("name", ""),
-                            r.get("content", ""),
-                            r.get("world_id"),
-                            "{}",
-                            r.get("created_at", ""),
-                        ),
-                    )
+            # AI 内容表：只替换备份里含有的表（角色卡 state/人设/草稿/关系随之恢复）。
+            # 群聊/会话是对话历史，不入备份，保留不动。
+            for key, table in self.AI_TABLE_KEYS.items():
+                if key in data:
+                    self._replace_table(c, table, data.get(key, []) or [])
 
     def import_plan(self, text: str) -> int:
         """从外部「导入计划」：把文件里的任务树【追加】进来，不覆盖现有数据。
