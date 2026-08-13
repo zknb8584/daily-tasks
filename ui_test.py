@@ -11,6 +11,7 @@ import base64
 import datetime as dt
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import types
@@ -1126,6 +1127,63 @@ def main():
     assert len(rdb2.list_drafts()) == 1
     assert len(rdb2.list_character_relations()) == 1
     assert any(g["id"] == g_keep for g in rdb2.list_group_chats())  # 已有群聊不被误删
+
+    # ---- 迁移：老 schema 库（缺 items 新列）升级后老行保留、新列带默认 ----
+    mig = os.path.join(tmp, "mig.db")
+    mconn = sqlite3.connect(mig)
+    mconn.execute(
+        "CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "parent_id INTEGER, title TEXT NOT NULL, deadline TEXT DEFAULT '',"
+        "done INTEGER DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    mconn.execute(
+        "INSERT INTO items(parent_id,title,created_at) VALUES(NULL,'老任务','2026-01-01T00:00:00')"
+    )
+    mconn.commit()
+    mconn.close()
+    mdb = Database(mig)
+    old = mdb.get(1)
+    assert old["title"] == "老任务"                       # 老行保留
+    assert old["note"] == "" and old["repeat_type"] == ""  # 新列带默认值
+    assert old["tag_id"] is None
+
+    # ---- _merge_role_state：AI 回复带 ---STATE--- 合并进角色卡（按真实调用方流程） ----
+    st_card = db.create_role_card("状态角色", "[核心]\n名字：状态角色\n")
+    st_sess = db.create_ai_session("roleplay", "状态会话", role_card_id=st_card)
+    db.append_ai_message(st_sess, "user", "你最近怎样？")
+    orig_st = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: (
+        "我很好。\n---STATE---\n好感度=66\n重要记忆=一起淋过雨"
+    )
+    reply = asyncio.run(app._chat_with_role_card(db.get_ai_session(st_sess)))
+    appmod.chat_completion = orig_st
+    assert reply and "我很好" in reply
+    clean, state = appmod.parse_state_block(reply)
+    app._merge_role_state(st_card, state)
+    st = db.role_card_state(st_card)
+    assert st.get("好感度") == "66", st
+    assert "一起淋过雨" in st.get("重要记忆", ""), st
+
+    # ---- 主动发言：单轮 _run_proactive_private 不崩、状态复位、可停 ----
+    pro_card = db.create_role_card("主动角色", "[核心]\n名字：主动角色\n")
+    pro_sess = db.create_ai_session("roleplay", "主动会话", role_card_id=pro_card)
+    db.append_ai_message(pro_sess, "user", "你在吗")
+    orig_pro = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: "我在。\n---STATE---\n好感度=60"
+    asyncio.run(app._run_proactive_private(
+        db.get_ai_session(pro_sess), db.get_role_card(pro_card)
+    ))
+    appmod.chat_completion = orig_pro
+    assert pro_sess not in app._proactive_running         # 跑完复位
+    assert app._speaking_role is None
+    assert db.role_card_state(pro_card).get("好感度") == "60"
+    # 防并发：上一轮没结束就跳过（busy 标志不被重置）
+    app._proactive_busy = True
+    asyncio.run(app._check_proactive_roleplay())
+    assert app._proactive_busy is True
+    app._proactive_busy = False
+    app._stop_proactive()
+    assert app._proactive_stop.is_set()
 
     print("UI TEST OK")
 
