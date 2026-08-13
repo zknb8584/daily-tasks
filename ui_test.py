@@ -450,37 +450,86 @@ def main():
     # ---- 滑动：Dismissible 包装构造不崩 ----
     wrapper = app._dismiss_wrap(ft.ListTile(title=ft.Text("x")), 1)
     assert isinstance(wrapper, ft.Dismissible)
-    app._swipe_armed = {}
-    app._swipe_armed_at = {}
-    app._swipe_blocked = {}
+
+    # 两段式：第一段武装+弹回不执行，第二段才执行（按住多久都不会误触发）
+    class FakeDismissible:
+        def __init__(self):
+            self.dismissed = None
+
+        async def confirm_dismiss(self, dismiss):
+            self.dismissed = dismiss
+
     fake_dir = ft.DismissDirection.END_TO_START
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=fake_dir, progress=0.3),
-        1, False,
-    )
-    assert app._swipe_armed[(1, str(fake_dir))] is True
-    time.sleep(1.1)
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=fake_dir, progress=0.3),
-        1, False,
+    swipe_t = db.add(None, "滑动两段")
+    ctl = FakeDismissible()
+    asyncio.run(app._confirm_swipe(
+        types.SimpleNamespace(direction=fake_dir, control=ctl), swipe_t, False,
+    ))
+    assert app._swipe_armed[(swipe_t, str(fake_dir))] is True
+    assert ctl.dismissed is False                      # 第一段弹回
+    assert db.get(swipe_t) is not None                 # 第一段不执行
+    ctl2 = FakeDismissible()
+    asyncio.run(app._confirm_swipe(
+        types.SimpleNamespace(direction=fake_dir, control=ctl2), swipe_t, False,
+    ))
+    assert ctl2.dismissed is True                      # 第二段放行
+    assert db.get(swipe_t) is not None                 # 动作在 on_dismiss，还没执行
+    app._do_swipe(types.SimpleNamespace(direction=fake_dir), swipe_t, False)
+    assert db.get(swipe_t) is None                     # 删除执行
+    assert len(app._dismissed_stack) == 1
+    app._undo_dismissed()
+    assert any(r["title"] == "滑动两段" for r in db.roots())
+
+    # 反向取消：另一方向拖动清掉已武装
+    swipe_u = db.add(None, "滑动反向取消")
+    app._swipe_armed[(swipe_u, str(fake_dir))] = True
+    app._on_swipe_cancel_other(
+        types.SimpleNamespace(
+            direction=ft.DismissDirection.START_TO_END, progress=0.1),
+        swipe_u, False,
     )
     assert app._swipe_armed == {}
-    reverse_dir = ft.DismissDirection.START_TO_END
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=fake_dir, progress=0.3),
-        2, False,
+
+    # 带子项右滑完成：第二段弹整组确认，确认后才执行
+    def _btn_has(btn, text):
+        out = []
+        collect_text(btn, out)
+        return text in "".join(out)
+
+    proj = db.add(None, "滑动带子项项目")
+    sub_proj = db.add(proj, "滑动子任务")
+
+    # 先完成第一段（武装），第二段才弹整组确认
+    ctlA = FakeDismissible()
+    asyncio.run(app._confirm_swipe(
+        types.SimpleNamespace(
+            direction=ft.DismissDirection.START_TO_END, control=ctlA),
+        proj, False,
+    ))
+    assert ctlA.dismissed is False
+
+    async def _drive_group_confirm(ctl):
+        task = asyncio.ensure_future(app._confirm_swipe(
+            types.SimpleNamespace(
+                direction=ft.DismissDirection.START_TO_END, control=ctl),
+            proj, False,
+        ))
+        await asyncio.sleep(0.05)
+        dlg = pg.last_dialog
+        assert isinstance(dlg, ft.AlertDialog), dlg
+        ok = next(a for a in dlg.actions if _btn_has(a, "确认完成"))
+        ok.on_click(FakeEvent(ok))
+        return await asyncio.wait_for(task, timeout=5)
+
+    ctl3 = FakeDismissible()
+    asyncio.run(_drive_group_confirm(ctl3))
+    assert ctl3.dismissed is True                      # 用户确认后放行
+    app._do_swipe(
+        types.SimpleNamespace(direction=ft.DismissDirection.START_TO_END),
+        proj, False,
     )
-    assert app._swipe_armed[(2, str(fake_dir))] is True
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=reverse_dir, progress=0.1),
-        2, False,
-    )
-    assert app._swipe_armed == {}
-    app._on_swipe_update(
-        types.SimpleNamespace(direction=reverse_dir, progress=0.3),
-        2, False,
-    )
-    assert app._swipe_armed == {}
+    assert db.get(proj)["done"] == 1
+    assert db.get(sub_proj)["done"] == 1
 
     # ---- 预览按钮：最后一条无大纲时隐藏，有大纲时显示 ----
     db.append_ai_message(sid, "assistant", "好的，明白了。")

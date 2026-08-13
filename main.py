@@ -24,6 +24,7 @@ import base64
 import calendar as _cal
 import asyncio
 import datetime as dt
+import functools
 import io
 import json
 import os
@@ -196,9 +197,7 @@ class TaskApp:
         self._pending_import = None     # 等待绑定世界观的导入角色卡
         self._group_loaded_sections = {}  # 群聊里各角色已加载的角色卡段
         self._role_loaded_sections = {} # roleplay 会话已加载的角色卡段
-        self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动
-        self._swipe_armed_at = {}       # 两段式滑动：第一次滑动的触发时间
-        self._swipe_blocked = {}        # 反向拖动取消后，本次手势不再自动换操作
+        self._swipe_armed = {}          # 两段式滑动：记录是否已完成第一次滑动（key=(item_id, direction)）
         self._suggestion_options = {}   # 角色扮演会话的建议回复
         self._proactive_running = set()
         self._speaking_role = None
@@ -1553,7 +1552,7 @@ class TaskApp:
                     on_click=lambda e: self.page.run_task(
                         self._auto_generate_ai_relation,
                         first_dd, second_dd, relation_field, affection_slider,
-                        affection_text,
+                        affection_text, mode_value[0],
                     ),
                 ),
                 ft.TextButton("删除关系", on_click=_delete_relation),
@@ -1565,25 +1564,33 @@ class TaskApp:
 
     async def _auto_generate_ai_relation(
             self, first_dd, second_dd, relation_field,
-            affection_slider, affection_text):
+            affection_slider, affection_text, mode="user_ai"):
         if not first_dd.value or not second_dd.value:
             self._toast("请选择两张卡")
             return
-        role_a = self.db.get_role_card(int(first_dd.value))
+        if mode == "user_ai":
+            role_a = self.db.get_user_card(int(first_dd.value))
+            label_a = "用户人设卡"
+        else:
+            role_a = self.db.get_role_card(int(first_dd.value))
+            label_a = "角色卡 A"
         role_b = self.db.get_role_card(int(second_dd.value))
         if not role_a or not role_b:
             self._toast("角色卡不存在")
             return
         cfg = self.db.get_ai_config()
         system = (
-            "你是角色关系设定助手。根据两张角色卡和共同世界观，"
-            "生成他们之间可能的关系和好感度。只输出两行：\n"
+            "你是角色关系设定助手。只依据下面给出的卡片内容推断关系，"
+            "不要引入卡片里没有的外部设定，也不要关联任何现实或影视作品。"
+            "注意：本应用叫「天野陽菜」，但这只是应用名称，与《天气之子》无关；"
+            "即使卡片里有类似字样，也不代表角色属于该作品，除非卡片内容明确写了作品背景。"
+            "只输出两行：\n"
             "关系=...\n好感度=0到200的整数"
         )
         payload = [
             {"role": "system", "content": system},
             {"role": "user", "content": (
-                f"角色A：{role_a['name']}\n{role_a['content'][:500]}\n\n"
+                f"{label_a}：{role_a['name']}\n{role_a['content'][:500]}\n\n"
                 f"角色B：{role_b['name']}\n{role_b['content'][:500]}"
             )},
         ]
@@ -1945,7 +1952,9 @@ class TaskApp:
                 if self.db.get_character_relation(a["id"], b["id"]):
                     continue
                 system = (
-                    "你是角色关系设定助手。根据两张角色卡和世界观，"
+                    "你是角色关系设定助手。只依据角色卡给出的设定推断关系，"
+                    "不要引入卡片没有的外部设定，也不要关联任何现实或影视作品；"
+                    "「天野陽菜」只是应用名，与《天气之子》无关。"
                     "输出一行：关系=...，好感度=0到200的整数"
                 )
                 payload = [
@@ -5150,8 +5159,8 @@ class TaskApp:
             content=tile,
             dismiss_direction=ft.DismissDirection.HORIZONTAL,
             dismiss_thresholds={
-                ft.DismissDirection.END_TO_START: 1.5,
-                ft.DismissDirection.START_TO_END: 1.5,
+                ft.DismissDirection.END_TO_START: 0.35,
+                ft.DismissDirection.START_TO_END: 0.35,
             },
             background=ft.Container(
                 alignment=ft.Alignment(0, 0),
@@ -5179,60 +5188,93 @@ class TaskApp:
                     spacing=6,
                 ),
             ),
-            on_update=lambda e, i=item_id, d=done: self._on_swipe_update(
-                e, i, d
-            ),
-            on_dismiss=lambda e, i=item_id, d=done: self._on_dismiss(e, i, d),
+            on_update=functools.partial(self._on_swipe_cancel_other,
+                                        item_id=item_id, done=done),
+            on_confirm_dismiss=functools.partial(self._confirm_swipe,
+                                                  item_id=item_id, done=done),
+            on_dismiss=functools.partial(self._do_swipe,
+                                          item_id=item_id, done=done),
         )
 
-    def _on_swipe_update(self, e, item_id, done):
+    def _on_swipe_cancel_other(self, e, item_id, done):
+        """反向拖动：取消本行已武装的反方向操作（只做取消，不执行动作）。"""
+        direction = getattr(e, "direction", None)
+        progress = float(getattr(e, "progress", 0) or 0)
+        if progress < 0.08:
+            return
+        for key in list(self._swipe_armed):
+            if key[0] == item_id and key[1] != str(direction):
+                self._swipe_armed.pop(key, None)
+                self._toast("已取消，重新滑动可选择其他操作")
+                return
+
+    async def _confirm_swipe(self, e, item_id, done):
+        """两段式判定：第一次滑过阈值→武装+弹回；第二次滑过阈值→执行。"""
         direction = getattr(e, "direction", None)
         key = (item_id, str(direction))
-        progress = float(getattr(e, "progress", 0) or 0)
-        if progress < 0.05:
-            self._swipe_blocked[key] = False
-            return
-        if progress < 0.2:
-            if progress > 0.08:
-                for old_key in list(self._swipe_armed):
-                    if old_key[0] == item_id and old_key[1] != str(direction):
-                        self._swipe_armed.pop(old_key, None)
-                        self._swipe_armed_at.pop(old_key, None)
-                        self._swipe_blocked[key] = True
-                        self._toast("已取消，重新滑动可选择其他操作")
-                        return
-            return
-        if self._swipe_blocked.get(key):
-            return
-        if self._swipe_armed.get(key):
-            if time.monotonic() - self._swipe_armed_at.get(key, 0) < 1.0:
-                return
-            self._swipe_armed.pop(key, None)
-            self._swipe_armed_at.pop(key, None)
-            if direction == ft.DismissDirection.END_TO_START:
-                self._dismiss_delete(item_id)
-            else:
-                self._dismiss_complete(item_id, done)
-            return
         if not self._swipe_armed.get(key):
-            for old_key in list(self._swipe_armed):
-                if old_key[0] == item_id:
-                    self._swipe_armed.pop(old_key, None)
-                    self._swipe_armed_at.pop(old_key, None)
             self._swipe_armed[key] = True
-            self._swipe_armed_at[key] = time.monotonic()
             if direction == ft.DismissDirection.END_TO_START:
                 label = "删除"
             else:
                 label = "恢复" if done else "完成"
             self._toast(f"已显示操作，再滑动一次确认{label}")
+            await e.control.confirm_dismiss(False)
+            return
+        self._swipe_armed.pop(key, None)
+        if (
+            direction == ft.DismissDirection.START_TO_END
+            and not done
+            and self.db.has_children(item_id)
+        ):
+            ok = await self._confirm_complete_group_async(item_id)
+        else:
+            ok = True
+        await e.control.confirm_dismiss(ok)
 
-    def _on_dismiss(self, e, item_id, done):
+    def _do_swipe(self, e, item_id, done):
+        """on_dismiss：确认执行后才走到这里，做真正动作。"""
         direction = getattr(e, "direction", None)
         if direction == ft.DismissDirection.END_TO_START:
             self._dismiss_delete(item_id)
         elif direction == ft.DismissDirection.START_TO_END:
             self._dismiss_complete(item_id, done)
+
+    async def _confirm_complete_group_async(self, item_id):
+        """滑动的第二段：带子项完成前弹确认框，返回是否确认（超时视为取消）。"""
+        it = self.db.get(item_id)
+        if not it:
+            return True
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def _decide(ok):
+            if not fut.done():
+                fut.set_result(ok)
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("整个项目都完成了吗？"),
+            content=ft.Text(f"「{it['title']}」\n确认后将连同所有子任务一起移入完成区。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: _decide(False)),
+                ft.FilledButton(content="确认完成", on_click=lambda e: _decide(True)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
+        try:
+            return await asyncio.wait_for(fut, timeout=20)
+        except asyncio.TimeoutError:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+            return False
 
     def _dismiss_delete(self, item_id):
         it = self.db.get(item_id)
@@ -5276,8 +5318,8 @@ class TaskApp:
         if not it:
             return
         if self.db.has_children(item_id):
-            self._render()
-            self._confirm_complete_group(item_id)
+            # 滑动第二段已弹过整组确认，直接执行
+            self._do_complete_group(item_id)
             return
         if it.get("repeat_type"):
             self._complete_recurring(item_id, it)
