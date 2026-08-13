@@ -4855,19 +4855,34 @@ class TaskApp:
         controls.append(self._stats_card())
         controls.append(self._home_toolbar())
 
-        roots = [r for r in self.db.roots() if not r["done"]]
+        all_roots = list(self.db.roots())
         if self._tag_filter:
-            roots = [r for r in roots if self._item_tag_name(r["id"]) == self._tag_filter]
-        self._sort_items(roots, group=True)
+            all_roots = [
+                r for r in all_roots
+                if self._item_tag_name(r["id"]) == self._tag_filter
+            ]
+        # 未完成在前；已完成但子树未完的划线沉底；整棵子树完工的进完成区
+        active = [r for r in all_roots if not r["done"]]
+        struck = [r for r in all_roots if r["done"] and not self.db.fully_done(r["id"])]
+        self._sort_items(active, group=True)
+        self._sort_items(struck, group=True)
 
-        if not roots:
+        if not active and not struck:
             controls.append(self._empty_hint("还没有项目，点右下角 + 新建"))
-        for i, r in enumerate(roots):
-            kids = [k for k in self.db.children(r["id"]) if not k["done"]]
+        for i, r in enumerate(active):
+            kids = [k for k in self.db.children(r["id"])
+                    if not (k["done"] and self.db.fully_done(k["id"]))]
             self._sort_items(kids)
             controls.append(self._level1_row(r, kids))
-            if i < len(roots) - 1:
+            if i < len(active) - 1:
                 controls.append(ft.Container(height=10))   # 项目间留白（无色）
+        for i, r in enumerate(struck):
+            kids = [k for k in self.db.children(r["id"])
+                    if not (k["done"] and self.db.fully_done(k["id"]))]
+            self._sort_items(kids)
+            controls.append(self._level1_row(r, kids))
+            if i < len(struck) - 1:
+                controls.append(ft.Container(height=10))
         return controls
 
     def _home_toolbar(self):
@@ -4919,7 +4934,10 @@ class TaskApp:
 
     # ---------- 子视图（单层卡片列表） ----------
     def _render_level(self, parent_id):
-        children = [c for c in self.db.children(parent_id) if not c["done"]]
+        children = [
+            c for c in self.db.children(parent_id)
+            if not (c["done"] and self.db.fully_done(c["id"]))
+        ]
         self._sort_items(children)
         if not children:
             return [self._empty_hint("这个项目下还没有子任务")]
@@ -4928,28 +4946,20 @@ class TaskApp:
     # ---------- 全局完成区 ----------
     def _render_done(self):
         controls = []
-        done_roots = [r for r in self.db.roots() if r["done"]]
-        controls.append(self._section_title(f"已完成的大项目 ({len(done_roots)})"))
-        if done_roots:
-            self._sort_items(done_roots, group=True)
-            for r in done_roots:
-                controls.append(self._done_group(r))
+        groups = self._completed_groups()
+        controls.append(self._section_title(f"已完成 ({len(groups)})"))
+        if groups:
+            g_items = sorted(
+                (self.db.get(g) for g in groups),
+                key=lambda it: it["title"] if it else "",
+            )
+            for it in g_items:
+                controls.append(ft.Container(
+                    margin=ft.Margin(bottom=6),
+                    content=ft.Column(self._done_subtree(it["id"]), spacing=0),
+                ))
         else:
-            controls.append(self._hint_text("暂无已完成的大项目"))
-
-        standalone = []
-        for r in self.db.roots():
-            if r["done"]:
-                continue
-            for c in self.db.children(r["id"]):
-                if c["done"]:
-                    standalone.append((r, c))
-        controls.append(self._section_title(f"进行中项目下的已完成子任务 ({len(standalone)})"))
-        if standalone:
-            for parent, c in standalone:
-                controls.append(self._done_row(c, parent_title=parent["title"]))
-        else:
-            controls.append(self._hint_text("暂无"))
+            controls.append(self._hint_text("暂无已完成项目"))
 
         controls.append(ft.Container(
             padding=ft.Padding(top=12, bottom=20),
@@ -4957,6 +4967,49 @@ class TaskApp:
             content=ft.TextButton("清除全部已完成", on_click=self._confirm_clear_all),
         ))
         return controls
+
+    def _completed_groups(self):
+        """收集所有「整棵子树完工」的顶层完工组 id（任意深度，深层也进完成区）。"""
+        groups = []
+        stack = [None]
+        while stack:
+            parent = stack.pop()
+            rows = self.db.roots() if parent is None else self.db.children(parent)
+            for it in rows:
+                if self.db.fully_done(it["id"]):
+                    groups.append(it["id"])
+                else:
+                    stack.append(it["id"])
+        return groups
+
+    def _done_subtree(self, item_id, depth=0):
+        """渲染一棵完工子树（递归，任意深度），缩进表达层级，可逐级恢复。"""
+        it = self.db.get(item_id)
+        if not it:
+            return []
+        kids = self.db.children(item_id)
+        row = ft.ListTile(
+            content_padding=ft.Padding(left=12 + 40 * depth, right=8, top=0, bottom=0),
+            leading=ft.Checkbox(
+                value=True, active_color=ft.Colors.PRIMARY,
+                on_change=lambda e, i=item_id: self._undo_completed(i),
+            ),
+            title=ft.Text(
+                it["title"],
+                size=17 if depth == 0 else 14,
+                weight=ft.FontWeight.W_600 if depth == 0 else ft.FontWeight.NORMAL,
+                style=ft.TextStyle(
+                    decoration=ft.TextDecoration.LINE_THROUGH, color=ft.Colors.GREY
+                ),
+                max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+            trailing=self._item_menu(item_id, bool(kids), done_ctx=True),
+            min_height=52,
+        )
+        out = [self._dismiss_wrap(row, item_id, done=True)]
+        for k in kids:
+            out.extend(self._done_subtree(k["id"], depth + 1))
+        return out
 
     def _section_title(self, text):
         return ft.Container(
@@ -5347,13 +5400,17 @@ class TaskApp:
         if tag:
             meta.append(self._tag_pill(tag))
 
+        root_done = bool(root["done"])
         root_tile = ft.ListTile(
                 leading=ft.Checkbox(
-                    value=False, active_color=ft.Colors.PRIMARY,
+                    value=root_done, active_color=ft.Colors.PRIMARY,
                     on_change=lambda e, i=item_id: self._on_toggle(e, i),
                 ),
                 title=ft.Text(root["title"], size=17, weight=ft.FontWeight.W_600,
-                               max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                              style=ft.TextStyle(
+                                  decoration=ft.TextDecoration.LINE_THROUGH,
+                                  color=ft.Colors.GREY) if root_done else None,
+                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                 subtitle=ft.Row(meta, spacing=6) if meta else None,
                 trailing=self._item_menu(item_id, bool(kids)),
                 on_click=lambda e, i=item_id: self._enter_children(i),
@@ -5369,6 +5426,7 @@ class TaskApp:
         """第二层项目行：小字号 + 缩进（ListTile）。"""
         item_id = it["id"]
         has_children = self.db.has_children(item_id)
+        done = bool(it["done"])
         meta = []
         if it["deadline"]:
             meta.append(self._deadline_pill(it["deadline"]))
@@ -5381,10 +5439,13 @@ class TaskApp:
         return ft.ListTile(
             content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
             leading=ft.Checkbox(
-                value=False, active_color=ft.Colors.PRIMARY,
+                value=done, active_color=ft.Colors.PRIMARY,
                 on_change=lambda e, i=item_id: self._on_toggle(e, i),
             ),
             title=ft.Text(it["title"], size=14, max_lines=1,
+                          style=ft.TextStyle(
+                              decoration=ft.TextDecoration.LINE_THROUGH,
+                              color=ft.Colors.GREY) if done else None,
                           overflow=ft.TextOverflow.ELLIPSIS),
             subtitle=ft.Row(meta, spacing=6) if meta else None,
             trailing=self._item_menu(item_id, has_children),
@@ -5393,63 +5454,6 @@ class TaskApp:
             dense=True,
             min_height=48,
         )
-
-    # ================= 完成区（ListTile，与首页一致） =================
-    def _done_group(self, root):
-        item_id = root["id"]
-        kids = self.db.children(item_id)
-        self._sort_items(kids)
-        root_tile = ft.ListTile(
-                leading=ft.Checkbox(
-                    value=True, active_color=ft.Colors.PRIMARY,
-                    on_change=lambda e, i=item_id: self._undo_completed(i),
-                ),
-                title=ft.Text(root["title"], size=17, weight=ft.FontWeight.W_600,
-                              style=ft.TextStyle(
-                                  decoration=ft.TextDecoration.LINE_THROUGH,
-                                  color=ft.Colors.GREY),
-                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                trailing=self._item_menu(item_id, bool(kids), done_ctx=True),
-                min_height=58,
-            )
-        tiles = [self._dismiss_wrap(root_tile, item_id, done=True)]
-        for k in kids:
-            tiles.append(self._dismiss_wrap(self._done_child_row(k), k["id"], done=True))
-        return ft.Column(tiles, spacing=0)
-
-    def _done_child_row(self, it):
-        item_id = it["id"]
-        meta = []
-        if it["deadline"]:
-            meta.append(self._deadline_pill(it["deadline"]))
-        return ft.ListTile(
-            content_padding=ft.Padding(left=52, right=8, top=0, bottom=0),
-            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
-            title=ft.Text(it["title"], size=14,
-                          style=ft.TextStyle(
-                              decoration=ft.TextDecoration.LINE_THROUGH,
-                              color=ft.Colors.GREY),
-                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            subtitle=ft.Row(meta, spacing=6) if meta else None,
-            trailing=self._item_menu(item_id, False, done_ctx=True),
-            dense=True,
-            min_height=46,
-        )
-
-    def _done_row(self, it, parent_title):
-        item_id = it["id"]
-        return self._dismiss_wrap(ft.ListTile(
-            leading=ft.Icon(ft.Icons.CHECK_CIRCLE, size=20, color=ft.Colors.TEAL),
-            title=ft.Text(it["title"], size=14,
-                          style=ft.TextStyle(
-                              decoration=ft.TextDecoration.LINE_THROUGH,
-                              color=ft.Colors.GREY),
-                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            subtitle=ft.Text(f"属于：{parent_title}", size=11,
-                             color=ft.Colors.BLUE_GREY_400),
-            trailing=self._item_menu(item_id, False, done_ctx=True),
-            min_height=52,
-        ), item_id, done=True)
 
     # ================= 交互 =================
     def _on_row_click(self, item_id, has_children):
@@ -5572,15 +5576,10 @@ class TaskApp:
         self._render()
 
     def _all_done_items(self):
-        """返回所有应处于完成区的条目 id（完成的大项目整组 + 进行中项目下完成的子任务）。"""
+        """返回所有应处于完成区的条目 id（整棵完工子树的全体节点，任意深度）。"""
         ids = []
-        for r in self.db.roots():
-            if r["done"]:
-                ids.extend(self.db._subtree_ids(r["id"]))
-            else:
-                for c in self.db.children(r["id"]):
-                    if c["done"]:
-                        ids.append(c["id"])
+        for g in self._completed_groups():
+            ids.extend(self.db._subtree_ids(g))
         return ids
 
     def _confirm_clear_all(self, e):

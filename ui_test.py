@@ -184,7 +184,7 @@ def main():
     texts = rendered_texts(app)
     assert any("大项目A" in t for t in texts), texts
     assert any("完成项目B" in t for t in texts), texts
-    assert any("已完成的大项目" in t for t in texts), texts
+    assert any("已完成" in t for t in texts), texts
     app._undo_completed(b)
     assert db.get(b)["done"] == 0
     assert db.get(b1)["done"] == 0
@@ -192,6 +192,52 @@ def main():
     assert app._show_done is False
     texts = rendered_texts(app)
     assert any("完成项目B" in t for t in texts), texts               # B 回首页
+
+    # ---- 深层已完成任务可见性：完工节点任意深度都进完成区（不再消失）；子树未完的划线沉底 ----
+    projX = db.add(None, "深层项目X")
+    childY = db.add(projX, "深层子项Y")
+    leafZ = db.add(childY, "深层叶子Z")
+    db.set_done(leafZ, True)                       # Z 单独完成，祖先未完成
+    app._render()
+    app._enter_children(projX)
+    app._render()
+    app._enter_children(childY)
+    app._render()
+    texts = rendered_texts(app)
+    assert not any("深层叶子Z" in t for t in texts)  # 完工叶子从层级页收走（进完成区）
+    app._back()
+    app._back()
+    app._open_done()
+    texts = rendered_texts(app)
+    assert any("深层叶子Z" in t for t in texts)      # 深度≥2 的完工叶子出现在完成区，不再消失
+    app._close_done()
+
+    # done 且子树未完 → 划线沉底留在本层，未完成子项仍可见
+    projS = db.add(None, "滑动沉底项目S")
+    db.set_done(projS, True)                       # 先完成，再挂未完成子项
+    db.add(projS, "未完子项")
+    app._render()
+    texts = rendered_texts(app)
+    assert any("滑动沉底项目S" in t for t in texts)  # S 划线沉底留在首页
+    assert any("未完子项" in t for t in texts)       # 未完成子项也可见
+
+    # 深层完工子树：P(未完) → Q(完成) → R(完成)，Q 整棵完工 → 完成区递归显示，从层级页收走
+    projP = db.add(None, "深层项目P")
+    childQ = db.add(projP, "深层子项Q")
+    grandR = db.add(childQ, "深层孙项R")
+    db.set_done(grandR, True)
+    db.set_done(childQ, True)                       # Q 完工（子树全 done）
+    app._render()
+    app._open_done()
+    texts = rendered_texts(app)
+    assert any("深层子项Q" in t for t in texts), texts
+    assert any("深层孙项R" in t for t in texts), texts
+    app._close_done()
+    app._enter_children(projP)
+    app._render()
+    texts = rendered_texts(app)
+    assert not any("深层子项Q" in t for t in texts), texts  # 完工子树从层级页收走
+    app._back()
 
     # ---- 标签：创建 / 分配 / 导出导入 ----
     tag_id = db.get_or_create_tag("工作")
