@@ -204,6 +204,8 @@ class TaskApp:
         self._speaking_role = None
         self._proactive_cancel = False
         self._proactive_thread_started = False
+        self._proactive_stop = threading.Event()   # 退出/关闭时停掉主动发言轮询
+        self._proactive_busy = False               # 全局防并发：同一时刻只跑一轮
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
@@ -602,47 +604,64 @@ class TaskApp:
         if self._proactive_thread_started:
             return
         self._proactive_thread_started = True
+        try:
+            self.page.on_close = self._stop_proactive
+            self.page.on_disconnect = self._stop_proactive
+        except Exception:
+            pass
 
         def loop():
-            while True:
+            while not self._proactive_stop.is_set():
                 time.sleep(60)
                 try:
+                    # 退后台/不可见时不发 AI 请求（省电省流量），回到前台自动继续
+                    if not getattr(self.page, "app_visible", True):
+                        continue
                     runner = getattr(self.page, "run_task", None)
                     if runner:
                         runner(self._check_proactive_roleplay)
                 except Exception:
                     pass
 
-        threading.Thread(target=loop, daemon=True).start()
+        threading.Thread(target=loop, daemon=True, name="proactive").start()
+
+    def _stop_proactive(self, e=None):
+        self._proactive_stop.set()
 
     async def _check_proactive_roleplay(self):
-        roles = self.db.list_role_cards()
-        for card in roles:
-            freq = int(card.get("active_speech_frequency") or 30)
-            if freq <= 0:
-                continue
-            if random.random() * 100 <= (100 - freq):
-                continue
-            for sess in self.db.list_ai_sessions():
-                if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card["id"]:
-                    if sess["id"] not in self._proactive_running:
-                        await self._run_proactive_private(sess, card)
-                    break
-        groups = self.db.list_group_chats()
-        for g in groups:
-            members = self.db.group_members(g["id"])
-            candidates = [
-                m for m in members
-                if int(m.get("active_speech_frequency") or 30) > 0
-            ]
-            if not candidates:
-                continue
-            chosen = random.choice(candidates)
-            freq = int(chosen.get("active_speech_frequency") or 30)
-            if random.random() * 100 <= (100 - freq):
-                continue
-            if g["id"] not in self._proactive_running:
-                await self._run_proactive_group(g, chosen)
+        if self._proactive_busy:      # 上一轮还在跑就跳过，避免并发 AI 请求
+            return
+        self._proactive_busy = True
+        try:
+            roles = self.db.list_role_cards()
+            for card in roles:
+                freq = int(card.get("active_speech_frequency") or 30)
+                if freq <= 0:
+                    continue
+                if random.random() * 100 <= (100 - freq):
+                    continue
+                for sess in self.db.list_ai_sessions():
+                    if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card["id"]:
+                        if sess["id"] not in self._proactive_running:
+                            await self._run_proactive_private(sess, card)
+                        break
+            groups = self.db.list_group_chats()
+            for g in groups:
+                members = self.db.group_members(g["id"])
+                candidates = [
+                    m for m in members
+                    if int(m.get("active_speech_frequency") or 30) > 0
+                ]
+                if not candidates:
+                    continue
+                chosen = random.choice(candidates)
+                freq = int(chosen.get("active_speech_frequency") or 30)
+                if random.random() * 100 <= (100 - freq):
+                    continue
+                if g["id"] not in self._proactive_running:
+                    await self._run_proactive_group(g, chosen)
+        finally:
+            self._proactive_busy = False
 
     async def _run_proactive_private(self, sess, card):
         key = sess["id"]
