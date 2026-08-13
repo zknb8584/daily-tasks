@@ -64,7 +64,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.16"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.17"     # 每次构建手动递增，便于确认手机上是哪个包
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
