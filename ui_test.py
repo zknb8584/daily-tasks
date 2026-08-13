@@ -698,10 +698,10 @@ def main():
     auto_user_id = auto_sess["user_card_id"]
     auto_user_card = db.get_user_card(auto_user_id)
     assert "身份/关系" not in auto_user_card["content"]
-    assert "自动生成" in auto_user_card["content"]
+    assert auto_user_card["name"] == "我"      # 未选人设卡时用共享「我」卡，不分裂
     pair = db.get_role_relation(auto_user_id, card_id)
     assert pair["relation"] == "同学"
-    assert pair["affection"] == "30 友好"
+    assert pair["affection"] == "30"           # 好感度统一存数字
     user_card_id = db.create_user_card(
         "旅人阿澈", "我是来自异世界的旅人，名字叫阿澈，说话直接。"
     )
@@ -713,6 +713,35 @@ def main():
     app._begin_roleplay(role_b_id, None, "同学", "30 友好", user_card_id)
     assert db.get_role_relation(user_card_id, role_b_id)["relation"] == "同学"
     assert db.get_role_relation(user_card_id, role_a_id)["relation"] == "恋人"
+
+    # ---- 关系数据一致性：好感度统一存数字 / 共享「我」卡 / 对话同步 ----
+    # 1) 存标签字符串 → 落库统一成数字（关系管理 int() 解析不再崩溃）
+    db.save_role_relation(user_card_id, role_a_id, "青梅竹马", "60 亲近")
+    assert db.get_role_relation(user_card_id, role_a_id)["affection"] == "60"
+    assert appmod._affection_int("60 亲近") == 60
+    assert appmod._affection_int(None) == 50
+    assert appmod._affection_int("120 亲密") == 120
+    # 2) 未选人设卡时共用「我」卡：新角色不分裂出新卡
+    my_id = app._default_user_card_id()
+    role_c = db.create_role_card("角色C", "[核心]\n名字：角色C\n")
+    app._begin_roleplay(role_c, None, "恋人", "120")
+    assert app._default_user_card_id() == my_id
+    rel_c = db.get_role_relation(my_id, role_c)
+    assert rel_c and rel_c["relation"] == "恋人" and rel_c["affection"] == "120", rel_c
+    # 3) 关系管理/地图里改关系 → 对话即时读到（_chat_with_role_card 把最新关系注入提示词）
+    db.save_role_relation(my_id, role_c, "仇敌", "10")
+    sid_c = app._ai_session_id
+    db.append_ai_message(sid_c, "user", "你记得我们的关系吗？")
+    captured = []
+    orig_cc = appmod.chat_completion
+    appmod.chat_completion = lambda *a, **k: (captured.append(a[3]) or "记得。")
+    asyncio.run(app._chat_with_role_card(db.get_ai_session(sid_c)))
+    appmod.chat_completion = orig_cc
+    assert captured, "应该已调用 chat_completion"
+    sys_text = captured[0][0]["content"]
+    assert "仇敌" in sys_text, sys_text[:300]       # 最新关系已注入对话
+    assert "好感度" in sys_text and "10" in sys_text, sys_text[:300]
+
     db.set_role_autonomy(role_a_id, 80)
     assert db.get_role_card(role_a_id)["autonomy"] == 80
     assert "自主性：高" in ai_client.build_autonomy_rule(80)

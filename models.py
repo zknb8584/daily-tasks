@@ -800,6 +800,14 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    @staticmethod
+    def _affection_str(value):
+        """把好感度表示（'70' / '30 友好' / 70）统一成数字字符串，防止类型不一致导致 int() 崩溃。"""
+        try:
+            return str(int(float(str(value).strip().split()[0])))
+        except (TypeError, ValueError, IndexError):
+            return "50"
+
     def save_role_relation(self, user_card_id, role_card_id,
                            relation="", affection=""):
         user_id = user_card_id or 0
@@ -812,7 +820,8 @@ class Database:
                 "ON CONFLICT(user_card_id,role_card_id) DO UPDATE SET "
                 "relation=excluded.relation, affection=excluded.affection, "
                 "updated_at=excluded.updated_at",
-                (user_id, role_card_id, relation or "", affection or "", now),
+                (user_id, role_card_id, relation or "",
+                 self._affection_str(affection), now),
             )
 
     def update_role_card(self, card_id, name=None, content=None, world_id=_UNSET):

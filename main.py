@@ -64,7 +64,16 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.17"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.18"     # 每次构建手动递增，便于确认手机上是哪个包
+
+
+def _affection_int(value):
+    """把好感度表示（'70' / '30 友好' / 70 / None）解析成 int，解析失败默认 50。"""
+    try:
+        return int(float(str(value).strip().split()[0]))
+    except (TypeError, ValueError, IndexError):
+        return 50
+
 DATE_FMT = "%Y-%m-%d"
 DATETIME_FMT = "%Y-%m-%d %H:%M"
 
@@ -511,6 +520,7 @@ class TaskApp:
         self._render()
 
     def _open_relation_map(self, center_key=None):
+        self._ai_center = True   # 确保从任意入口进入关系地图都能渲染出来
         if center_key and center_key != self._relation_map_center:
             self._map_positions = None
             self._map_view = None
@@ -596,7 +606,8 @@ class TaskApp:
             content=None,
         )
         self._ensure_map_state(center)
-        self._redraw_map()
+        # 直接在渲染期构建内容，不走 _redraw_map 的 page.update()（避免挂载时序竞态导致空白）
+        self._map_host.content = self._build_relation_network(center)
         return [
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
@@ -1618,14 +1629,15 @@ class TaskApp:
             pair = None
             if mode_value[0] == "user_ai":
                 user_id = int(first_dd.value) if first_dd.value else 0
-                pair = self.db.get_role_relation(user_id, second_dd.value)
+                rid = int(second_dd.value) if second_dd.value else 0
+                pair = self.db.get_role_relation(user_id, rid)
             elif first_dd.value and second_dd.value:
                 pair = self.db.get_character_relation(
                     int(first_dd.value), int(second_dd.value)
                 )
             if pair:
                 relation_field.value = pair.get("relation") or ""
-                affection_slider.value = int(pair.get("affection") or 50)
+                affection_slider.value = _affection_int(pair.get("affection"))
             else:
                 relation_field.value = ""
                 affection_slider.value = 50
@@ -2539,25 +2551,27 @@ class TaskApp:
         )
         affection_dd = ft.Dropdown(
             label="初始好感度",
-            value="0 中立",
+            value="0",
             options=[
-                ft.dropdown.Option(key="-20 疏远", text="-20 疏远"),
-                ft.dropdown.Option(key="0 中立", text="0 中立"),
-                ft.dropdown.Option(key="30 友好", text="30 友好"),
-                ft.dropdown.Option(key="60 亲近", text="60 亲近"),
-                ft.dropdown.Option(key="90 信赖", text="90 信赖"),
-                ft.dropdown.Option(key="120 亲密", text="120 亲密"),
-                ft.dropdown.Option(key="180 依恋", text="180 依恋"),
+                ft.dropdown.Option(key="-20", text="-20 疏远"),
+                ft.dropdown.Option(key="0", text="0 中立"),
+                ft.dropdown.Option(key="30", text="30 友好"),
+                ft.dropdown.Option(key="60", text="60 亲近"),
+                ft.dropdown.Option(key="90", text="90 信赖"),
+                ft.dropdown.Option(key="120", text="120 亲密"),
+                ft.dropdown.Option(key="180", text="180 依恋"),
             ],
         )
         def _load_pair():
             user_id = int(user_dd.value) if user_dd.value else 0
-            pair = self.db.get_role_relation(user_id, dropdown.value)
+            rid = int(dropdown.value) if dropdown.value else 0
+            pair = self.db.get_role_relation(user_id, rid)
             relation_field.value = (
                 pair["relation"] if pair and pair.get("relation") else "陌生人"
             )
             affection_dd.value = (
-                pair["affection"] if pair and pair.get("affection") else "0 中立"
+                str(_affection_int(pair["affection"]))
+                if pair and pair.get("affection") else "0"
             )
         dropdown.on_change = lambda e: (_load_pair(), self.page.update())
         user_dd.on_change = lambda e: (_load_pair(), self.page.update())
@@ -3542,6 +3556,24 @@ class TaskApp:
         self._toast("用户人设已删除")
         self._return_to_roleplay_context()
 
+    def _default_user_card_id(self):
+        """未选人设卡时使用的共享默认「我」卡：保证各角色关系能协同、不分裂。"""
+        for uc in self.db.list_user_cards():
+            if uc["name"] == "我":
+                return uc["id"]
+        return self.db.create_user_card(
+            "我",
+            "默认用户人设。未选择特定人设卡时使用，与各角色的关系单独记录。",
+        )
+
+    def _session_relation(self, sess, card_id):
+        """取某会话的角色关系；会话没绑人设卡或该卡无关系时，回退到共享「我」卡。"""
+        user_cid = sess.get("user_card_id") if sess else None
+        pair = self.db.get_role_relation(user_cid, card_id)
+        if not pair:
+            pair = self.db.get_role_relation(self._default_user_card_id(), card_id)
+        return pair
+
     def _begin_roleplay(self, card_id, dlg=None, relation=None, affection=None,
                         user_card_id=None):
         if dlg is not None:
@@ -3554,11 +3586,8 @@ class TaskApp:
             self._toast("角色卡不存在")
             return
         if not user_card_id and (relation or affection):
-            user_card_id = self.db.create_user_card(
-                f"我 · 与「{card['name']}」",
-                f"自动生成：与「{card['name']}」第一次聊天时创建。"
-                "身份关系和好感度只保存在对应关系记录里。",
-            )
+            # 用共享「我」卡，而不是给每个角色新造一张「我 · 与角色X」
+            user_card_id = self._default_user_card_id()
         # 每个角色一个永久聊天框：直接继续已有 roleplay 会话
         existing = None
         for sess in self.db.list_ai_sessions():
@@ -3626,8 +3655,10 @@ class TaskApp:
                             user_card_id=None, pop_dialog=True):
         if pop_dialog:
             self.page.pop_dialog()
+        uid = int(user_card_id) if user_card_id else None
+        cid = int(card_id) if card_id else card_id
         self.db.save_role_relation(
-            user_card_id, card_id, relation or "", affection or ""
+            uid, cid, relation or "", affection or ""
         )
         self._ai_session_id = sid
         self._ai_center = False
@@ -3750,9 +3781,7 @@ class TaskApp:
     def _role_state_card(self, card_id, session_id):
         state = self.db.role_card_state(card_id)
         sess = self.db.get_ai_session(session_id) if session_id else None
-        pair = self.db.get_role_relation(
-            sess.get("user_card_id") if sess else None, card_id
-        )
+        pair = self._session_relation(sess, card_id)
         if pair:
             if pair.get("relation"):
                 state["身份"] = pair["relation"]
@@ -3850,9 +3879,7 @@ class TaskApp:
     def _open_edit_state(self, card_id):
         state = self.db.role_card_state(card_id)
         sess = self.db.get_ai_session(self._ai_session_id) if self._ai_session_id else None
-        pair = self.db.get_role_relation(
-            sess.get("user_card_id") if sess else None, card_id
-        )
+        pair = self._session_relation(sess, card_id)
         if pair:
             state["身份"] = pair.get("relation") or ""
             state["好感度"] = pair.get("affection") or ""
@@ -4326,9 +4353,7 @@ class TaskApp:
                 self.db.set_ai_session_scene(sess["id"], scene)
             if card:
                 state = self.db.role_card_state(card["id"])
-                pair = self.db.get_role_relation(
-                    sess.get("user_card_id"), card["id"]
-                )
+                pair = self._session_relation(sess, card["id"])
                 if pair:
                     if pair.get("relation"):
                         state["身份"] = pair["relation"]
