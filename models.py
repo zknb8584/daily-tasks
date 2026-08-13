@@ -1029,6 +1029,68 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def repair_orphan_relations(self):
+        """把关系重连到「最新一张同名卡」（重复导入后 id 变了也能自动找回）。
+
+        对每条关系：取它引用的卡片名 → 找现有同名卡片中 id 最大的一张 → 若当前指向的不是
+        最新那张，就改指过去（目标关系已存在则合并删除旧行）。返回重连条数。
+        """
+        roles = {c["id"]: c["name"] for c in self.list_role_cards()}
+        users = {u["id"]: u["name"] for u in self.list_user_cards()}
+
+        def newest(name, mapping):
+            if not name:
+                return None
+            ids = [i for i, n in mapping.items() if n == name]
+            return max(ids) if ids else None
+
+        fixed = 0
+        with self._conn() as c:
+            for rel in self.list_role_relations():
+                rid, uid = rel["role_card_id"], rel.get("user_card_id")
+                new_rid = newest(rel.get("role_name") or roles.get(rid), roles) or rid
+                new_uid = uid
+                if uid and uid not in users:
+                    new_uid = newest(rel.get("user_name") or users.get(uid), users) or uid
+                if new_rid == rid and new_uid == uid:
+                    continue
+                if c.execute(
+                    "SELECT 1 FROM ai_role_relations WHERE user_card_id=? AND role_card_id=? AND id!=?",
+                    (new_uid, new_rid, rel["id"]),
+                ).fetchone():
+                    c.execute("DELETE FROM ai_role_relations WHERE id=?", (rel["id"],))
+                else:
+                    c.execute(
+                        "UPDATE ai_role_relations SET user_card_id=?, role_card_id=? WHERE id=?",
+                        (new_uid, new_rid, rel["id"]),
+                    )
+                fixed += 1
+            for rel in self.list_character_relations():
+                a, b = rel["role_card_id_a"], rel["role_card_id_b"]
+                na = newest(rel.get("role_a_name") or roles.get(a), roles) or a
+                nb = newest(rel.get("role_b_name") or roles.get(b), roles) or b
+                if na == a and nb == b:
+                    continue
+                if c.execute(
+                    "SELECT 1 FROM ai_character_relations WHERE role_card_id_a=? AND role_card_id_b=? AND id!=?",
+                    (na, nb, rel["id"]),
+                ).fetchone():
+                    c.execute("DELETE FROM ai_character_relations WHERE id=?", (rel["id"],))
+                else:
+                    c.execute(
+                        "UPDATE ai_character_relations SET role_card_id_a=?, role_card_id_b=? WHERE id=?",
+                        (na, nb, rel["id"]),
+                    )
+                fixed += 1
+        return fixed
+
+    def relation_counts(self):
+        """关系表行数（诊断用）。返回 (用户↔角色, 角色↔角色)。"""
+        with self._conn() as c:
+            rr = c.execute("SELECT COUNT(*) FROM ai_role_relations").fetchone()[0]
+            cr = c.execute("SELECT COUNT(*) FROM ai_character_relations").fetchone()[0]
+        return rr, cr
+
     def import_relations(self, manifest):
         """按名字匹配，把关系清单导入 ai_character_relations / ai_role_relations。
 

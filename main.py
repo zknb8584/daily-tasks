@@ -63,7 +63,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.20"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.21"     # 每次构建手动递增，便于确认手机上是哪个包
 
 
 def _affection_int(value):
@@ -511,6 +511,16 @@ class TaskApp:
         self._roleplay_view = "cards"
         self._render()
 
+    def _repair_relations(self, e=None):
+        """把指向旧/失效卡片 id 的关系按名字重连到现有卡片（重复导入后也能找回）。"""
+        try:
+            n = self.db.repair_orphan_relations()
+        except Exception as ex:
+            self._toast(f"重连失败：{ex}")
+            return
+        self._toast(f"已重连 {n} 条失效关系" if n else "没有需要重连的失效关系")
+        self._render()
+
     def _open_relation_map(self, center_key=None):
         self._ai_center = True
         self._ai_category = "角色扮演"   # 从任意入口进入都确保渲染出关系视图
@@ -519,6 +529,10 @@ class TaskApp:
         if self._roleplay_view != "relations":
             self._relation_map_return_view = self._roleplay_view or "home"
         self._roleplay_view = "relations"
+        try:
+            self.db.repair_orphan_relations()   # 打开前先重连失效关系，尽量把关系找回来
+        except Exception:
+            pass
         self._render()
 
     def _render_relation_map_page(self):
@@ -551,6 +565,10 @@ class TaskApp:
             [
                 center_dd,
                 ft.IconButton(
+                    icon=ft.Icons.LINK, tooltip="重连失效关系",
+                    on_click=self._repair_relations,
+                ),
+                ft.IconButton(
                     icon=ft.Icons.REFRESH, tooltip="刷新",
                     on_click=lambda e: self._render(),
                 ),
@@ -576,10 +594,35 @@ class TaskApp:
         nodes, edges, center_name = self._relation_network_data(center)
         direct = [e for e in edges if e["source"] == center or e["target"] == center]
         if not direct:
+            n_rr, n_cr = self.db.relation_counts()
             return [
                 ft.Container(
                     margin=ft.Margin(top=12, left=12, right=12, bottom=4),
                     content=self._hint_text("这个角色还没有建立关系"),
+                ),
+                ft.Container(
+                    margin=ft.Margin(left=12, right=12, bottom=4),
+                    content=ft.Text(
+                        f"关系表：用户↔角色 {n_rr} 条 / 角色↔角色 {n_cr} 条",
+                        size=11, color=ft.Colors.GREY,
+                    ),
+                ),
+                ft.Container(
+                    padding=ft.Padding(left=12, right=12, top=2, bottom=4),
+                    content=ft.Row(
+                        [
+                            ft.FilledButton(
+                                content="导入关系清单",
+                                icon=ft.Icons.UPLOAD_FILE,
+                                on_click=lambda e: self.page.run_task(self._import_relations),
+                            ),
+                            ft.OutlinedButton(
+                                content="去设置关系",
+                                on_click=lambda e: self._open_relation_manager(),
+                            ),
+                        ],
+                        spacing=8,
+                    ),
                 ),
                 ft.Container(
                     padding=ft.Padding(left=12, right=12, top=4, bottom=4),
@@ -2243,17 +2286,19 @@ class TaskApp:
 
     # ---------- 角色扮演：角色卡 ----------
     def _open_roleplay_start(self, card_id):
-        # 关系是数据库里的唯一事实源：只要该角色已设过「我」的关系，就直接进聊天，
-        # 不再要求重新设置（关系图/关系管理里设过也一样生效）
+        # 关系是数据库里的唯一事实源：该角色只要有任意一条关系记录，就直接进聊天，
+        # 不再要求重新设置（关系图/关系管理/对话开始设过的都一样生效）
         if self._user_role_relation(self._default_user_card_id(), card_id):
             self._begin_roleplay(card_id)
             return
-        for sess in self.db.list_ai_sessions():
-            if sess["skill_id"] == "roleplay" and sess.get("role_card_id") == card_id:
-                pair = self._user_role_relation(sess.get("user_card_id"), card_id)
-                if pair:
-                    self._begin_roleplay(card_id)
-                    return
+        for rel in self.db.list_role_relations():
+            if rel.get("role_card_id") == card_id:
+                self._begin_roleplay(card_id)
+                return
+        for rel in self.db.list_character_relations():
+            if rel.get("role_card_id_a") == card_id or rel.get("role_card_id_b") == card_id:
+                self._begin_roleplay(card_id)
+                return
         self._choose_roleplay(initial_card_id=card_id)
 
     def _choose_roleplay(self, initial_card_id=None):

@@ -767,6 +767,20 @@ def main():
     assert any(e["relation"] == "同门" for e in edges), edges
     assert any(e["relation"] == "恋人" for e in edges), edges
 
+    # ---- 孤儿关系重连：重复导入后，关系按名重连到最新同名卡 ----
+    oa = db.create_role_card("重连卡A", "[核心]\n名字：重连卡A\n")
+    ob = db.create_role_card("重连卡B", "[核心]\n名字：重连卡B\n")
+    db.save_character_relation(oa, ob, "旧识", 60)
+    na2 = db.create_role_card("重连卡A", "[核心]\n名字：重连卡A\n")   # 同名新卡，id 更大
+    nb2 = db.create_role_card("重连卡B", "[核心]\n名字：重连卡B\n")
+    assert db.get_character_relation(na2, nb2) is None
+    n_fixed = db.repair_orphan_relations()
+    assert n_fixed >= 1, n_fixed
+    rel = db.get_character_relation(na2, nb2)
+    assert rel and rel["relation"] == "旧识", rel
+    rr, cr = db.relation_counts()
+    assert isinstance(rr, int) and isinstance(cr, int)
+
     db.set_role_autonomy(role_a_id, 80)
     assert db.get_role_card(role_a_id)["autonomy"] == 80
     assert "自主性：高" in ai_client.build_autonomy_rule(80)
