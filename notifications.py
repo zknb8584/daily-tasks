@@ -22,6 +22,9 @@ try:  # plyer 在桌面端/打包环境都可能缺失，缺失时降级为打�
 except Exception:  # pragma: no cover
     _HAS_PLYER = False
 
+# 对外公开：当前构建是否真的能发系统通知（flet Android 运行时无 plyer 后端，恒为 False）
+SYSTEM_NOTIFY_OK = _HAS_PLYER
+
 
 def notify(title: str, message: str):
     if not _HAS_PLYER:
@@ -106,6 +109,25 @@ class Notifier:
                 pruned.add(k)
         self._save_notified(pruned)
         return fired
+
+    # ---------------- 应用内提醒 ----------------
+    def pending_alerts(self):
+        """当前所有「即将到期/已过期」的任务（首页横幅用，不受去重影响）。"""
+        now = dt.datetime.now()
+        out = []
+        for it in self.db.due_items():
+            d = parse_deadline(it["deadline"])
+            if d is None:
+                continue
+            cat = self._category(d, now)
+            if cat:
+                out.append({
+                    "id": it["id"],
+                    "title": it["title"],
+                    "deadline": it["deadline"],
+                    "category": cat,
+                })
+        return out
 
     # ---------------- 后台线程 ----------------
     def start(self, interval: int = 600):

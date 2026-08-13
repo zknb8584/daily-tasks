@@ -60,7 +60,7 @@ from ai_client import (
     tavern_to_role_card,
 )
 from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, parse_deadline, save_quotes
-from notifications import Notifier, notify
+from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
 APP_VERSION = "v1.8.15"     # 每次构建手动递增，便于确认手机上是哪个包
@@ -164,6 +164,7 @@ class TaskApp:
         self.page = page
         self.db = Database()
         self.notifier = Notifier(self.db)
+        self._notice_dismissed = set()   # 本次会话已点掉的到期提醒
 
         self.stack = []                 # 导航栈：[(parent_id, title), ...]，空 = 顶层
         self._show_done = False         # 是否在全局「完成区」界面
@@ -4852,6 +4853,9 @@ class TaskApp:
             qc = self._quote_card()
             if qc is not None:
                 controls.append(qc)
+        alerts = self._pending_notices()
+        if alerts:
+            controls.append(self._notice_banner(alerts))
         controls.append(self._stats_card())
         controls.append(self._home_toolbar())
 
@@ -4884,6 +4888,45 @@ class TaskApp:
             if i < len(struck) - 1:
                 controls.append(ft.Container(height=10))
         return controls
+
+    # ---------- 应用内到期提醒 ----------
+    def _pending_notices(self):
+        return [
+            a for a in self.notifier.pending_alerts()
+            if a["id"] not in self._notice_dismissed
+        ]
+
+    def _notice_banner(self, alerts):
+        overdue = [a for a in alerts if a["category"] == "overdue"]
+        due = [a for a in alerts if a["category"] != "overdue"]
+        lines = []
+        for a in overdue:
+            lines.append(f"已过期：{a['title']} · {fmt_deadline(a['deadline'])}")
+        for a in due:
+            lines.append(f"即将到期：{a['title']} · {fmt_deadline(a['deadline'])}")
+        return ft.Container(
+            margin=ft.Margin(left=12, right=12, top=8, bottom=4),
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
+            border_radius=12,
+            bgcolor=ft.Colors.AMBER_100,
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE, color=ft.Colors.ORANGE_800),
+                    ft.Column(
+                        [ft.Text(l, size=13, color=ft.Colors.BROWN) for l in lines[:4]],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.TextButton("知道了", on_click=self._dismiss_notices),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _dismiss_notices(self, e):
+        for a in self._pending_notices():
+            self._notice_dismissed.add(a["id"])
+        self._render()
 
     def _home_toolbar(self):
         chips = [
@@ -5986,6 +6029,11 @@ class TaskApp:
                     ft.ListTile(
                         leading=ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE),
                         title=ft.Text("测试通知"),
+                        subtitle=ft.Text(
+                            "系统通知当前不可用，到期提醒以首页横幅展示" if not SYSTEM_NOTIFY_OK
+                            else "发送一条系统通知验证",
+                            size=11,
+                        ),
                         on_click=self._test_notify,
                     ),
                 ],
@@ -6167,8 +6215,11 @@ class TaskApp:
 
     def _test_notify(self, e):
         self.page.pop_dialog()
-        notify("测试通知", "如果看到这条，说明通知功能正常")
-        self._toast("已发送测试通知")
+        if SYSTEM_NOTIFY_OK:
+            notify("测试通知", "如果看到这条，说明通知功能正常")
+            self._toast("已发送测试通知")
+        else:
+            self._toast("当前构建不支持系统通知；到期/过期任务会以首页横幅提醒")
 
     # ================= 工具 =================
     def _toast(self, msg, action_label=None, on_undo=None):

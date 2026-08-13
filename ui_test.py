@@ -239,6 +239,35 @@ def main():
     assert not any("深层子项Q" in t for t in texts), texts  # 完工子树从层级页收走
     app._back()
 
+    # ---- Notifier.scan：过期触发一次、去重、改期修剪后可再提醒 ----
+    n_db = Database(os.path.join(tmp, "notif.db"))
+    n_al = n_db.add(None, "提醒过期A",
+                    (dt.datetime.now() - dt.timedelta(hours=2)).strftime(appmod.DATETIME_FMT))
+    n_far = n_db.add(None, "提醒远期B",
+                     (dt.datetime.now() + dt.timedelta(days=30)).strftime(appmod.DATETIME_FMT))
+    n = appmod.Notifier(n_db, remind_before_hours=1)
+    fired = n.scan()
+    assert any("提醒过期A" in m for _, m in fired), fired
+    assert not any("提醒远期B" in m for _, m in fired), fired
+    assert n.scan() == []                                   # 去重：同阶段只提醒一次
+    n_db.update(n_al, deadline=(
+        dt.datetime.now() + dt.timedelta(days=1)).strftime(appmod.DATETIME_FMT))
+    assert n.scan() == []                                   # 改到远期后不再提醒，旧记录被修剪
+    n_db.update(n_al, deadline=(
+        dt.datetime.now() - dt.timedelta(hours=1)).strftime(appmod.DATETIME_FMT))
+    assert any("提醒过期A" in m for _, m in n.scan())       # 重新过期 → 可再次提醒
+
+    # ---- 应用内到期提醒横幅：过期任务进首页横幅，点「知道了」收起 ----
+    alerts = app._pending_notices()
+    assert any(a["title"] == "过期项目C" for a in alerts), alerts
+    app._render()
+    texts = rendered_texts(app)
+    assert any("已过期" in t for t in texts), texts
+    assert any("过期项目C" in t for t in texts), texts
+    app._dismiss_notices(None)
+    texts = rendered_texts(app)
+    assert not any("已过期：过期项目C" in t for t in texts), texts
+
     # ---- 标签：创建 / 分配 / 导出导入 ----
     tag_id = db.get_or_create_tag("工作")
     assert tag_id is not None
