@@ -590,10 +590,6 @@ class TaskApp:
             ),
         ]
 
-    def _close_roleplay_view(self, e=None):
-        self._roleplay_view = None
-        self._render()
-
     def _return_to_roleplay_context(self):
         self._ai_center = True
         if self._ai_category == "角色扮演" and self._roleplay_view is None:
@@ -1693,8 +1689,6 @@ class TaskApp:
                 return self._render_relation_map_page()
             return self._render_roleplay_home()
         sessions = self.db.list_ai_sessions()
-        groups = self.db.list_group_chats()
-        role_cards = self.db.list_role_cards()
         for category, skill_ids in AI_CATEGORIES:
             if category != self._ai_category:
                 continue
@@ -1707,72 +1701,19 @@ class TaskApp:
                 skill = SKILL_BY_ID.get(skill_id)
                 if not skill:
                     continue
-                if skill_id == "roleplay":
-                    controls.append(ft.ListTile(
-                        leading=ft.Icon(ft.Icons.PERSON, color=ft.Colors.INDIGO_700),
-                        title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
-                        subtitle=ft.Text(skill["description"], size=12),
-                        trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE,
-                                         color=ft.Colors.INDIGO_700),
-                        on_click=lambda e: self._choose_roleplay(),
-                        min_height=64,
-                    ))
-                else:
-                    controls.append(ft.ListTile(
-                        leading=ft.Icon(ft.Icons.AUTO_AWESOME,
-                                        color=ft.Colors.BLUE_700),
-                        title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
-                        subtitle=ft.Text(skill["description"], size=12),
-                        trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE,
-                                         color=ft.Colors.BLUE_700),
-                        on_click=lambda e, sid=skill_id: (
-                            self._start_role_grill() if sid == "role_grill"
-                            else self._start_ai_session(sid)
-                        ),
-                        min_height=64,
-                    ))
-
-            if category == "角色扮演":
-                controls.append(ft.Container(
-                    margin=ft.Margin(top=12, left=12, right=12, bottom=2),
-                    content=ft.Text("角色聊天", size=12,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=ft.Colors.BLUE_GREY_500),
+                controls.append(ft.ListTile(
+                    leading=ft.Icon(ft.Icons.AUTO_AWESOME,
+                                    color=ft.Colors.BLUE_700),
+                    title=ft.Text(skill["name"], weight=ft.FontWeight.W_600),
+                    subtitle=ft.Text(skill["description"], size=12),
+                    trailing=ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE,
+                                     color=ft.Colors.BLUE_700),
+                    on_click=lambda e, sid=skill_id: (
+                        self._start_role_grill() if sid == "role_grill"
+                        else self._start_ai_session(sid)
+                    ),
+                    min_height=64,
                 ))
-                if not role_cards:
-                    controls.append(self._hint_text("还没有角色，先导入或生成一个"))
-                for card in role_cards:
-                    controls.append(self._role_chat_row(card))
-                controls.append(ft.TextButton(
-                    content="导入角色卡",
-                    icon=ft.Icons.UPLOAD_FILE,
-                    on_click=lambda e: self.page.run_task(self._import_role_card, None),
-                ))
-                controls.append(ft.TextButton(
-                    content="AI 生成角色卡",
-                    icon=ft.Icons.AUTO_AWESOME,
-                    on_click=lambda e: self._open_role_card_generator(None),
-                ))
-                controls.append(ft.TextButton(
-                    content="Grill-me 拷问生成",
-                    icon=ft.Icons.QUESTION_ANSWER,
-                    on_click=lambda e: self._start_role_grill(None),
-                ))
-                controls.append(ft.Container(
-                    margin=ft.Margin(top=12, left=12, right=12, bottom=2),
-                    content=ft.Text("我的群聊", size=12,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=ft.Colors.BLUE_GREY_500),
-                ))
-                controls.append(ft.TextButton(
-                    content="新建群聊",
-                    icon=ft.Icons.GROUPS,
-                    on_click=lambda e: self._open_group_creator(),
-                ))
-                if not groups:
-                    controls.append(self._hint_text("还没有群聊"))
-                for g in groups:
-                    controls.append(self._group_chat_row(g))
 
             cat_sessions = [
                 s for s in sessions if s["skill_id"] in skill_ids
@@ -2822,15 +2763,13 @@ class TaskApp:
         )
         self.page.show_dialog(confirm)
 
-    def _do_delete_role_card(self, card_id, reopen_choose=True):
+    def _do_delete_role_card(self, card_id):
         self.page.pop_dialog()
         for sess in self.db.list_ai_sessions():
             if sess.get("role_card_id") == card_id:
                 self.db.delete_ai_session(sess["id"])
         self.db.delete_role_card(card_id)
         self._toast("角色卡已删除")
-        if reopen_choose:
-            pass
         self._return_to_roleplay_context()
 
     def _confirm_delete_role_card(self, card_id):
@@ -2845,9 +2784,7 @@ class TaskApp:
                 ft.TextButton("取消", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton(
                     content="删除",
-                    on_click=lambda e: self._do_delete_role_card(
-                        card_id, reopen_choose=False
-                    ),
+                    on_click=lambda e: self._do_delete_role_card(card_id),
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -6242,6 +6179,17 @@ class TaskApp:
 
     # ================= 工具 =================
     def _toast(self, msg, action_label=None, on_undo=None):
+        # 连续提示时先关掉上一条 SnackBar，避免在 dialog 栈里堆叠（不动其它弹窗）
+        try:
+            stack = getattr(getattr(self.page, "_dialogs", None), "controls", None)
+            if stack:
+                for dlg in reversed(stack):
+                    if getattr(dlg, "open", False):
+                        if isinstance(dlg, ft.SnackBar):
+                            self.page.pop_dialog()
+                        break
+        except Exception:
+            pass
         action = None
         if action_label and on_undo:
             action = ft.SnackBarAction(

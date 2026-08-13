@@ -477,28 +477,12 @@ class Database:
             row = c.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
             return dict(row) if row else None
 
-    def get_many(self, ids):
-        if not ids:
-            return {}
-        q = ",".join("?" * len(ids))
-        with self._conn() as c:
-            rows = c.execute(f"SELECT * FROM items WHERE id IN ({q})", ids).fetchall()
-        return {r["id"]: dict(r) for r in rows}
-
     def delete(self, item_id):
         """级联删除整棵子树。"""
         ids = self._subtree_ids(item_id)
         with self._conn() as c:
             c.executemany("DELETE FROM items WHERE id=?", [(i,) for i in ids])
             q = ",".join("?" * len(ids))
-            c.execute(f"DELETE FROM completions WHERE item_id IN ({q})", ids)
-
-    def delete_many(self, ids):
-        if not ids:
-            return
-        q = ",".join("?" * len(ids))
-        with self._conn() as c:
-            c.execute(f"DELETE FROM items WHERE id IN ({q})", ids)
             c.execute(f"DELETE FROM completions WHERE item_id IN ({q})", ids)
 
     def children(self, parent_id):
@@ -1050,25 +1034,11 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def touch_ai_session(self, session_id):
-        now = dt.datetime.now().isoformat(timespec="seconds")
-        with self._conn() as c:
-            c.execute(
-                "UPDATE ai_sessions SET updated_at=? WHERE id=?", (now, session_id)
-            )
-
     def update_ai_session_user_card(self, session_id, user_card_id):
         with self._conn() as c:
             c.execute(
                 "UPDATE ai_sessions SET user_card_id=? WHERE id=?",
                 (user_card_id, session_id),
-            )
-
-    def rename_ai_session(self, session_id, title):
-        with self._conn() as c:
-            c.execute(
-                "UPDATE ai_sessions SET title=?, updated_at=? WHERE id=?",
-                (title, dt.datetime.now().isoformat(timespec="seconds"), session_id),
             )
 
     def delete_ai_session(self, session_id):
