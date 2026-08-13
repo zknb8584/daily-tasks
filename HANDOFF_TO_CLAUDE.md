@@ -150,7 +150,7 @@ task_app/
 - `_render_home()` / `_render_level()` / `_render_done()`：任务树和完成区。
 - `_render_ai_center()` / `_render_ai_chat()` / `_render_group_chat()`：AI 页面。
 - `_render_roleplay_home()` / `_render_roleplay_chat_page()` / `_render_roleplay_cards_page()`：角色扮演 UI。
-- `_render_relation_map_page()` / `_relation_network_data()` / `_force_layout_positions()` / `_build_relation_network()`：关系地图。
+- `_render_relation_map_page()` / `_relation_network_data()` / `_user_role_relation()`：关系地图（纯数据库辐条视图）。
 - `_import_role_card()` / `_prompt_import_world()` / `_create_imported_role_card()`：角色卡和用户人设卡导入。
 - `_open_relation_manager()`：关系管理弹窗。
 
@@ -199,10 +199,10 @@ task_app/
 
 当前实现思路：
 
-- 以“用户人设”或“AI 角色”为中心。
-- `_relation_network_data()` 收集中心的一级关系，以及一级角色之间的角色↔角色关系。
-- `_force_layout_positions()` 跑简单的力导向布局，节点位置确定。
-- `_build_relation_network()` 返回 `InteractiveViewer`，内部是绝对定位的 `Stack`。
+- **关系是数据库里的唯一事实源**（`ai_role_relations` / `ai_character_relations`），聊天、群聊、关系管理、关系图都读写同一份；关系图只是它的可视化映射（纯视图，每次渲染从库重读）。
+- `_relation_network_data()` 收集中心的一级关系。
+- `_render_relation_map_page()` 渲染「关系中心辐条视图」：中心一张卡 + 每条直接关系一张卡（点击进详情 / 编辑 / 删除）；改关系、切中心、导入关系清单后任意一次 `_render()` 即刷新。
+- 统一读法 `_user_role_relation()`（人设卡无关系时回退共享「我」卡）：聊天进入（`_open_roleplay_start`）与群聊（`_group_reply`）不再重复要求设置关系。
 - 连线颜色按好感度分级：疏远灰、普通蓝、友好绿、亲密蓝绿。
 - 节点显示完整名字，中心节点高亮。
 - 点击非中心角色节点会打开角色详情。

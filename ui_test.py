@@ -788,56 +788,76 @@ def main():
     assert any("关系地图" in t for t in texts), texts
     app._open_relation_map(f"r{role_a_id}")
     assert app._roleplay_view == "relations"
+    assert app._ai_category == "角色扮演"       # 任意入口都能渲染
     texts = rendered_texts(app)
-    assert any("关系网络" in t for t in texts), texts
+    assert any("关系地图" in t for t in texts), texts
     assert any("角色A" in t for t in texts), texts
     assert any("角色B" in t for t in texts), texts
     nodes, edges, center_name = app._relation_network_data(f"r{role_a_id}")
     assert center_name == "角色A"
     assert len(nodes) >= 3, nodes
     assert len(edges) >= 2, edges
-    net = app._build_relation_network(f"r{role_a_id}")
-    assert isinstance(net, ft.Container)
-    assert isinstance(net.content, ft.Stack)
-    # 节点 = Stack 里的 Container > GestureDetector > Row（可拖拽/可点开详情）
-    node_gds = [
-        c for c in net.content.controls
-        if isinstance(c, ft.Container)
-        and isinstance(c.content, ft.GestureDetector)
-        and isinstance(c.content.content, ft.Row)
-    ]
-    assert len(node_gds) == len(nodes), (len(node_gds), len(nodes))
-    # 画布背景手势层存在（空白处平移 / 捏合缩放）
-    bg_gds = [
-        c for c in net.content.controls
-        if isinstance(c, ft.GestureDetector) and isinstance(c.content, ft.Container)
-    ]
-    assert len(bg_gds) >= 1
-
-    # 手势：平移改 offset / 缩放夹 [0.3,3] / 拖拽改世界坐标 / 重置重布局
-    ox0 = app._map_view["ox"]
-    oy0 = app._map_view["oy"]
-    app._map_pan(types.SimpleNamespace(global_delta=ft.Offset(10, 5)))
-    assert app._map_view["ox"] == ox0 + 10, app._map_view
-    assert app._map_view["oy"] == oy0 + 5, app._map_view
-    app._map_scale_start(types.SimpleNamespace())
-    app._map_scale_update(types.SimpleNamespace(
-        scale=2.0, local_focal_point=ft.Offset(200, 260)))
-    assert 0.3 <= app._map_view["scale"] <= 3.0, app._map_view
-    before = app._map_positions[f"r{role_a_id}"]
-    app._map_drag_node(types.SimpleNamespace(global_delta=ft.Offset(20, 0)),
-                       f"r{role_a_id}")
-    after = app._map_positions[f"r{role_a_id}"]
-    assert after[0] != before[0], (before, after)
-    app._map_reset()
-    assert app._map_view is not None and app._map_view["scale"] > 0
-    assert f"r{role_a_id}" in app._map_positions
+    # 纯数据库视图：中心卡 + 每条直接关系一张卡（每次渲染从库重读）
+    texts = rendered_texts(app)
+    assert any("关系中心" in t for t in texts), texts
+    assert any("直接关系" in t for t in texts), texts
+    assert any("旧识" in t for t in texts), texts      # role_a↔role_b
+    assert any("青梅竹马" in t for t in texts), texts  # user↔role_a（前面一致性测试改成了青梅竹马）
+    # 刷新=重读库：改关系后 _render 立即反映
+    db.save_character_relation(role_a_id, role_b_id, "死对头", 5)
+    app._render()
+    texts = rendered_texts(app)
+    assert any("死对头" in t for t in texts), texts
+    db.save_character_relation(role_a_id, role_b_id, "旧识", 70)   # 还原
+    app._render()
+    # 切中心：列表重建
+    app._open_relation_map(f"r{role_b_id}")
+    assert app._relation_map_center == f"r{role_b_id}"
+    texts = rendered_texts(app)
+    assert any("直接关系" in t for t in texts), texts
+    assert any("同学" in t for t in texts), texts      # user↔role_b 的关系
+    app._open_relation_map(f"r{role_a_id}")
+    # 删除关系：确认弹窗 → 删除 → 列表消失
+    app._confirm_delete_relation(f"r{role_a_id}", f"r{role_b_id}")
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    dlg = pg.last_dialog
+    del_btn = next(a for a in dlg.actions if _btn_has(a, "删除"))
+    del_btn.on_click(FakeEvent(del_btn))
+    assert db.get_character_relation(role_a_id, role_b_id) is None
+    db.save_character_relation(role_a_id, role_b_id, "旧识", 70)   # 还原
+    app._render()
 
     # 节点点开详情：用户人设 → 详情弹窗
     app._open_user_details(user_card_id)
     assert isinstance(pg.last_dialog, ft.AlertDialog)
     assert pg.last_dialog.title.value == "用户人设详情"
     app.page.pop_dialog()
+
+    # ---- 聊天进入不再重新设置：关系图/关系管理设过「我」↔角色，直接进聊天 ----
+    chat_role = db.create_role_card("聊天关系角色", "[核心]\n名字：聊天关系角色\n")
+    db.save_role_relation(app._default_user_card_id(), chat_role, "恋人", 120)
+    app._open_roleplay_start(chat_role)
+    assert app._ai_session_id is not None            # 直接开始聊天，不弹选择框
+    # 没设关系的角色 → 才进选择弹窗
+    no_rel_role = db.create_role_card("无关系角色", "[核心]\n名字：无关系角色\n")
+    app._open_roleplay_start(no_rel_role)
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    app.page.pop_dialog()
+
+    # ---- 群聊成员选择：全部角色卡可选（不再被 [:20] 截断）----
+    extra_cards = [
+        db.create_role_card(f"群卡{i}", f"[核心]\n名字：群卡{i}\n")
+        for i in range(25)
+    ]
+    app._open_group_creator()
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    gc_dlg = pg.last_dialog
+    cb_count = sum(
+        1 for c in gc_dlg.content.controls
+        if isinstance(c, ft.Checkbox) and c.label != "自动生成群内关系"
+    )
+    assert cb_count == len(db.list_role_cards()), (cb_count, len(db.list_role_cards()))
+    pg.pop_dialog()
 
     app._open_relation_manager()
     assert isinstance(pg.last_dialog, ft.AlertDialog)
