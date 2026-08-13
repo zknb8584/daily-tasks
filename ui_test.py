@@ -824,12 +824,31 @@ def main():
     assert any("死对头" in t for t in texts), texts
     db.save_character_relation(role_a_id, role_b_id, "旧识", 70)   # 还原
     app._render()
-    # 切中心：列表重建
+    # 切中心：列表重建（中心用芯片选择器，点芯片切换）
     app._open_relation_map(f"r{role_b_id}")
     assert app._relation_map_center == f"r{role_b_id}"
     texts = rendered_texts(app)
     assert any("直接关系" in t for t in texts), texts
     assert any("同学" in t for t in texts), texts      # user↔role_b 的关系
+
+    def _walk_chips(ctrl, out):
+        if isinstance(ctrl, ft.Chip):
+            out.append(ctrl)
+        for attr in ("controls", "content", "subtitle", "leading", "trailing"):
+            child = getattr(ctrl, attr, None)
+            if isinstance(child, (list, tuple)):
+                for c in child:
+                    _walk_chips(c, out)
+            elif child is not None:
+                _walk_chips(child, out)
+
+    chips = []
+    for c in app.scroll.controls:
+        _walk_chips(c, chips)
+    assert any(isinstance(c, ft.Chip) for c in chips), chips   # 中心选择是芯片而非 Dropdown
+    chip_b = next(c for c in chips if getattr(c.label, "value", "").startswith("角色：角色B"))
+    chip_b.on_select(types.SimpleNamespace(control=chip_b, selected=True))
+    assert app._relation_map_center == f"r{role_b_id}", app._relation_map_center
     app._open_relation_map(f"r{role_a_id}")
     # 删除关系：确认弹窗 → 删除 → 列表消失
     app._confirm_delete_relation(f"r{role_a_id}", f"r{role_b_id}")

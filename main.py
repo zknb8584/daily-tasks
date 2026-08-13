@@ -63,7 +63,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.21"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.22"     # 每次构建手动递增，便于确认手机上是哪个包
 
 
 def _affection_int(value):
@@ -543,27 +543,37 @@ class TaskApp:
         """
         role_cards = self.db.list_role_cards()
         user_cards = self.db.list_user_cards()
-        options = [
-            ft.dropdown.Option(key=f"u{u['id']}", text=f"我：{u['name']}")
-            for u in user_cards
-        ] + [
-            ft.dropdown.Option(key=f"r{r['id']}", text=f"角色：{r['name']}")
-            for r in role_cards
-        ]
+        center_keys = [f"u{u['id']}" for u in user_cards] + [f"r{r['id']}" for r in role_cards]
         center = self._relation_map_center
-        if center not in [o.key for o in options]:
-            center = options[0].key if options else None
+        if center not in center_keys:
+            center = center_keys[0] if center_keys else None
             self._relation_map_center = center
-        center_dd = ft.Dropdown(
-            label="关系地图中心",
-            value=center,
-            options=options,
-        )
-        center_dd.expand = True
-        center_dd.on_change = lambda e: self._open_relation_map(e.control.value)
+        # 中心选择用可点按芯片（on_click），不用 Dropdown（真机上 on_change 可能不触发）
+        center_chips = []
+        for u in user_cards:
+            key = f"u{u['id']}"
+            center_chips.append(ft.Chip(
+                label=ft.Text(f"我：{u['name']}", max_lines=1,
+                              overflow=ft.TextOverflow.ELLIPSIS),
+                selected=(center == key),
+                on_select=lambda e, k=key: self._open_relation_map(k),
+            ))
+        for r in role_cards:
+            key = f"r{r['id']}"
+            center_chips.append(ft.Chip(
+                label=ft.Text(f"角色：{r['name']}", max_lines=1,
+                              overflow=ft.TextOverflow.ELLIPSIS),
+                selected=(center == key),
+                on_select=lambda e, k=key: self._open_relation_map(k),
+            ))
+        center_selector = None
+        if center_chips:
+            center_selector = ft.Container(
+                padding=ft.Padding(left=12, right=12, top=4, bottom=2),
+                content=ft.Row(center_chips, scroll=ft.ScrollMode.AUTO, spacing=4),
+            )
         toolbar = ft.Row(
             [
-                center_dd,
                 ft.IconButton(
                     icon=ft.Icons.LINK, tooltip="重连失效关系",
                     on_click=self._repair_relations,
@@ -586,6 +596,7 @@ class TaskApp:
                     margin=ft.Margin(top=12, left=12, right=12, bottom=4),
                     content=self._hint_text("先创建角色或用户人设，再查看关系"),
                 ),
+                *([center_selector] if center_selector else []),
                 ft.Container(
                     padding=ft.Padding(left=12, right=12, top=4, bottom=4),
                     content=toolbar,
@@ -600,6 +611,7 @@ class TaskApp:
                     margin=ft.Margin(top=12, left=12, right=12, bottom=4),
                     content=self._hint_text("这个角色还没有建立关系"),
                 ),
+                *([center_selector] if center_selector else []),
                 ft.Container(
                     margin=ft.Margin(left=12, right=12, bottom=4),
                     content=ft.Text(
@@ -633,10 +645,11 @@ class TaskApp:
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Text(
-                    f"关系地图 · 中心：{center_name}",
+                    f"关系地图 · 中心：{center_name}（点上方卡片切换中心）",
                     size=13, color=ft.Colors.BLUE_GREY_600,
                 ),
             ),
+            *([center_selector] if center_selector else []),
             ft.Container(
                 padding=ft.Padding(left=12, right=12, top=4, bottom=4),
                 content=toolbar,
