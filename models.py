@@ -125,7 +125,8 @@ class Database:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(self.path)
+        # timeout=15：后台扫描线程与 UI 并发写时等待锁，而不是立刻抛 database is locked
+        conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -135,6 +136,7 @@ class Database:
 
     def _init(self):
         with self._conn() as c:
+            c.execute("PRAGMA journal_mode=WAL")  # WAL：读写互不阻塞，降低并发锁冲突
             c.execute(
                 """CREATE TABLE IF NOT EXISTS items(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

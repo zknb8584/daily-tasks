@@ -11,6 +11,7 @@ App 被系统杀掉后不再触发 —— 这是方案 A 的已知边界，满�
 """
 import datetime as dt
 import json
+import sqlite3
 import threading
 import time
 
@@ -53,7 +54,15 @@ class Notifier:
             return set()
 
     def _save_notified(self, keys):
-        self.db.set_setting("notified", json.dumps(sorted(keys)))
+        for attempt in range(3):
+            try:
+                self.db.set_setting("notified", json.dumps(sorted(keys)))
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                raise
 
     # ---------------- 分类 ----------------
     def _category(self, deadline: dt.datetime, now: dt.datetime):
