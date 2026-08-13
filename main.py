@@ -34,6 +34,7 @@ import threading
 import time
 
 import flet as ft
+from flet.controls.core.canvas import Canvas, Line
 
 from ai_client import (
     AI_SKILLS,
@@ -207,6 +208,13 @@ class TaskApp:
         self._proactive_stop = threading.Event()   # 退出/关闭时停掉主动发言轮询
         self._proactive_busy = False               # 全局防并发：同一时刻只跑一轮
         self._dismissed_stack = []      # 滑动删除后的子树快照栈（逐个撤销）
+        # 关系地图：自定义视口（世界坐标 + 平移缩放）
+        self.MAP_W = 400
+        self.MAP_H = 520
+        self._map_positions = None      # 节点世界坐标 {key: (wx, wy)}
+        self._map_view = None           # 视口 {ox, oy, scale}
+        self._map_scale_at_start = 1.0  # 捏合开始的基准 scale
+        self._map_host = None           # 容纳网络图的容器（手势只更新它）
         self._editing_id = None         # 正在编辑的项目 id（None = 新建）
         self._target_parent = None      # 新建时的父项目 id
         self._title_field = None
@@ -503,6 +511,9 @@ class TaskApp:
         self._render()
 
     def _open_relation_map(self, center_key=None):
+        if center_key and center_key != self._relation_map_center:
+            self._map_positions = None
+            self._map_view = None
         if center_key:
             self._relation_map_center = center_key
         if self._roleplay_view != "relations":
@@ -524,6 +535,8 @@ class TaskApp:
         if center not in [o.key for o in options]:
             center = options[0].key if options else None
             self._relation_map_center = center
+            self._map_positions = None
+            self._map_view = None
         center_dd = ft.Dropdown(
             label="关系地图中心",
             value=center,
@@ -535,13 +548,19 @@ class TaskApp:
             [
                 center_dd,
                 ft.IconButton(
-                    icon=ft.Icons.FIT_SCREEN,
-                    tooltip="重置视图",
-                    on_click=lambda e: self._render(),
+                    icon=ft.Icons.ADD, tooltip="放大",
+                    on_click=lambda e: self._map_zoom_by(1.25),
                 ),
                 ft.IconButton(
-                    icon=ft.Icons.EDIT_NOTE,
-                    tooltip="关系管理",
+                    icon=ft.Icons.REMOVE, tooltip="缩小",
+                    on_click=lambda e: self._map_zoom_by(0.8),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.FIT_SCREEN, tooltip="重置视图",
+                    on_click=self._map_reset,
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_NOTE, tooltip="关系管理",
                     on_click=lambda e: self._open_relation_manager(),
                 ),
             ],
@@ -571,11 +590,18 @@ class TaskApp:
                     content=toolbar,
                 ),
             ]
+        self._map_host = ft.Container(
+            padding=ft.Padding(left=4, right=4, top=4, bottom=12),
+            alignment=ft.Alignment(0, 0),
+            content=None,
+        )
+        self._ensure_map_state(center)
+        self._redraw_map()
         return [
             ft.Container(
                 margin=ft.Margin(top=8, left=12, right=12, bottom=4),
                 content=ft.Text(
-                    f"关系网络 · {center_name} · {len(nodes)} 个节点",
+                    f"关系网络 · {center_name} · {len(nodes)} 个节点（拖拽节点 / 双指缩放）",
                     size=13, color=ft.Colors.BLUE_GREY_600,
                 ),
             ),
@@ -583,11 +609,7 @@ class TaskApp:
                 padding=ft.Padding(left=12, right=12, top=4, bottom=4),
                 content=toolbar,
             ),
-            ft.Container(
-                padding=ft.Padding(left=4, right=4, top=4, bottom=12),
-                alignment=ft.Alignment(0, 0),
-                content=self._build_relation_network(center),
-            ),
+            self._map_host,
         ]
 
     def _return_to_roleplay_context(self):
@@ -1177,7 +1199,7 @@ class TaskApp:
         return nodes, edges, center_name
 
     def _force_layout_positions(self, nodes, edges, center_key,
-                                canvas_w, canvas_h):
+                                canvas_w, canvas_h, seed=17):
         import math
         import random
 
@@ -1186,7 +1208,7 @@ class TaskApp:
         cx, cy = canvas_w / 2, canvas_h / 2
         positions[center_key] = (cx, cy)
         others = [k for k in keys if k != center_key]
-        rng = random.Random(17)
+        rng = random.Random(seed) if seed is not None else random.Random()
         if others:
             radius = max(130, min(canvas_w, canvas_h) * 0.38)
             for i, key in enumerate(others):
@@ -1256,7 +1278,7 @@ class TaskApp:
             return ft.Colors.GREEN_400
         return ft.Colors.TEAL_600
 
-    def _relation_node_control(self, node, x, y, is_center):
+    def _relation_node_control(self, node, x, y, is_center, key):
         name = node.get("name") or ("我" if node["kind"] == "user" else "角色")
         if is_center:
             node_w = max(118, min(210, 42 + len(name) * 15))
@@ -1294,27 +1316,31 @@ class TaskApp:
             border=ft.Border.all(1, border_color),
             border_radius=node_h / 2,
             alignment=ft.Alignment(0, 0),
-            ink=True,
-            content=ft.Row(
-                [
-                    ft.Icon(icon, size=icon_size, color=fg),
-                    ft.Text(
-                        name,
-                        size=text_size,
-                        weight=ft.FontWeight.W_600 if is_center
-                        else ft.FontWeight.W_500,
-                        color=fg,
-                        max_lines=2,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-                spacing=5,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            on_click=(
-                (lambda e, key=node["key"]: self._open_relation_target(key))
-                if not is_center else None
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            content=ft.GestureDetector(
+                content=ft.Row(
+                    [
+                        ft.Icon(icon, size=icon_size, color=fg),
+                        ft.Text(
+                            name,
+                            size=text_size,
+                            weight=ft.FontWeight.W_600 if is_center
+                            else ft.FontWeight.W_500,
+                            color=fg,
+                            max_lines=2,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                    ],
+                    width=node_w,
+                    height=node_h,
+                    spacing=5,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                on_tap=lambda e, k=key: self._open_relation_target(k),
+                on_pan_update=functools.partial(self._map_drag_node, key=key),
+                drag_interval=8,
             ),
         )
 
@@ -1353,69 +1379,197 @@ class TaskApp:
         )
 
     def _build_relation_network(self, center_key):
-        import math
-
+        """关系网络视口：Canvas 画边 + 背景手势层（平移/捏合缩放）+ 可拖拽节点。"""
+        self._ensure_map_state(center_key)
         nodes, edges, _center_name = self._relation_network_data(center_key)
         if not edges:
             return ft.Container(
                 alignment=ft.Alignment(0, 0),
                 content=self._hint_text("暂无关系"),
             )
-        canvas_w = 760
-        canvas_h = max(520, 420 + len(nodes) * 26)
-        positions = self._force_layout_positions(
-            nodes, edges, center_key, canvas_w, canvas_h
-        )
+        view = self._map_view
+        s = view["scale"]
+        ox, oy = view["ox"], view["oy"]
+        positions = self._map_positions
+
+        def to_screen(x, y):
+            return x * s + ox, y * s + oy
+
         controls = []
+        # 边：Canvas Line（屏幕坐标，修复旋转对齐问题）
+        line_shapes = []
         for edge in edges:
-            x1, y1 = positions[edge["source"]]
-            x2, y2 = positions[edge["target"]]
-            dx, dy = x2 - x1, y2 - y1
-            length = math.hypot(dx, dy)
-            if length < 2:
-                continue
-            color = self._relation_edge_color(edge)
-            controls.append(ft.Container(
-                left=(x1 + x2) / 2 - length / 2,
-                top=(y1 + y2) / 2 - 1,
-                width=length,
-                height=2,
-                bgcolor=color,
-                rotate=math.atan2(dy, dx),
+            sx1, sy1 = to_screen(*positions.get(edge["source"], (0, 0)))
+            sx2, sy2 = to_screen(*positions.get(edge["target"], (0, 0)))
+            line_shapes.append(Line(
+                x1=sx1, y1=sy1, x2=sx2, y2=sy2,
+                paint=ft.Paint(stroke_width=2, color=self._relation_edge_color(edge)),
             ))
-            label = self._relation_edge_label(edge, x1, y1, x2, y2, color)
+        controls.append(Canvas(width=self.MAP_W, height=self.MAP_H, shapes=line_shapes))
+        # 背景手势层：放 Canvas 之上、节点之下；空白处平移/捏合缩放
+        controls.append(ft.GestureDetector(
+            content=ft.Container(width=self.MAP_W, height=self.MAP_H),
+            on_pan_update=self._map_pan,
+            on_scale_start=self._map_scale_start,
+            on_scale_update=self._map_scale_update,
+        ))
+        # 边标签（屏幕坐标）
+        for edge in edges:
+            sx1, sy1 = to_screen(*positions.get(edge["source"], (0, 0)))
+            sx2, sy2 = to_screen(*positions.get(edge["target"], (0, 0)))
+            label = self._relation_edge_label(
+                edge, sx1, sy1, sx2, sy2, self._relation_edge_color(edge)
+            )
             if label is not None:
                 controls.append(label)
+        # 节点：可拖拽、可点开详情
         for key, node in nodes.items():
-            x, y = positions[key]
+            sx, sy = to_screen(*positions[key])
             controls.append(
-                self._relation_node_control(node, x, y, key == center_key)
+                self._relation_node_control(node, sx, sy, key == center_key, key)
             )
-        stack = ft.Stack(controls, width=canvas_w, height=canvas_h)
-        return ft.InteractiveViewer(
-            content=stack,
-            width=400,
-            height=440,
-            constrained=False,
-            pan_enabled=True,
-            scale_enabled=True,
-            min_scale=0.6,
-            max_scale=2.6,
-            boundary_margin=ft.Margin.all(80),
+        stack = ft.Stack(
+            controls, width=self.MAP_W, height=self.MAP_H,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            alignment=ft.Alignment(0, 0),
         )
+        return ft.Container(
+            width=self.MAP_W,
+            height=self.MAP_H,
+            border=ft.Border.all(
+                1, ft.Colors.with_opacity(0.3, ft.Colors.BLUE_GREY_200)
+            ),
+            border_radius=14,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            content=stack,
+        )
+
+    def _ensure_map_state(self, center_key):
+        """首次打开该中心时：力导向布局（世界坐标）+ 初始 fit 视口。"""
+        if self._map_positions is not None:
+            return
+        nodes, edges, _ = self._relation_network_data(center_key)
+        world_w = 760
+        world_h = max(520, 420 + len(nodes) * 26)
+        positions = self._force_layout_positions(
+            nodes, edges, center_key, world_w, world_h, seed=None
+        )
+        self._map_positions = positions
+        scale = min(self.MAP_W / world_w, self.MAP_H / world_h) * 0.9
+        scale = max(0.3, min(1.0, scale))
+        self._map_view = {
+            "ox": (self.MAP_W - world_w * scale) / 2,
+            "oy": (self.MAP_H - world_h * scale) / 2,
+            "scale": scale,
+        }
+
+    def _redraw_map(self):
+        """只重绘关系网络（不整页 _render，拖拽/缩放时保持平滑）。"""
+        if self._map_host is None or self._relation_map_center is None:
+            return
+        try:
+            self._map_host.content = self._build_relation_network(
+                self._relation_map_center
+            )
+            self.page.update()
+        except Exception:
+            pass
+
+    def _map_pan(self, e):
+        if self._map_view is None:
+            return
+        delta = getattr(e, "global_delta", None)
+        if delta is None:
+            return
+        self._map_view["ox"] += getattr(delta, "x", 0)
+        self._map_view["oy"] += getattr(delta, "y", 0)
+        self._redraw_map()
+
+    def _map_scale_start(self, e):
+        self._map_scale_at_start = self._map_view["scale"] if self._map_view else 1.0
+
+    def _map_scale_update(self, e):
+        if self._map_view is None:
+            return
+        rel = float(getattr(e, "scale", 1.0) or 1.0)
+        new_scale = max(0.3, min(3.0, self._map_scale_at_start * rel))
+        fp = getattr(e, "local_focal_point", None)
+        view = self._map_view
+        s = view["scale"]
+        if fp is not None:
+            fx = getattr(fp, "x", 0)
+            fy = getattr(fp, "y", 0)
+            wx = (fx - view["ox"]) / s if s else 0
+            wy = (fy - view["oy"]) / s if s else 0
+            view["ox"] = fx - wx * new_scale
+            view["oy"] = fy - wy * new_scale
+        view["scale"] = new_scale
+        self._redraw_map()
+
+    def _map_zoom_by(self, factor):
+        """工具栏 ± 按钮：绕视口中心缩放。"""
+        if self._map_view is None:
+            return
+        view = self._map_view
+        new_scale = max(0.3, min(3.0, view["scale"] * factor))
+        s = view["scale"]
+        cx, cy = self.MAP_W / 2, self.MAP_H / 2
+        wx = (cx - view["ox"]) / s if s else 0
+        wy = (cy - view["oy"]) / s if s else 0
+        view["ox"] = cx - wx * new_scale
+        view["oy"] = cy - wy * new_scale
+        view["scale"] = new_scale
+        self._redraw_map()
+
+    def _map_reset(self, e=None):
+        """重新力导向布局（新随机种子）+ 复位视口。"""
+        self._map_positions = None
+        self._map_view = None
+        self._redraw_map()
+
+    def _map_drag_node(self, e, key):
+        """拖拽节点：世界坐标 += 屏幕位移 / scale。"""
+        if self._map_view is None or self._map_positions is None:
+            return
+        delta = getattr(e, "global_delta", None)
+        if delta is None or key not in self._map_positions:
+            return
+        s = self._map_view["scale"]
+        wx, wy = self._map_positions[key]
+        self._map_positions[key] = (
+            wx + getattr(delta, "x", 0) / s,
+            wy + getattr(delta, "y", 0) / s,
+        )
+        self._redraw_map()
 
     def _open_relation_target(self, key):
         if key.startswith("r"):
             self._open_role_details(int(key[1:]))
         elif key.startswith("u"):
-            uid = int(key[1:])
-            card = self.db.get_user_card(uid) if uid else None
-            if card:
-                self._toast(f"用户人设：{card['name']}")
-            else:
-                self._toast("未绑定用户人设")
+            self._open_user_details(int(key[1:]))
+
+    def _open_user_details(self, uid):
+        """用户人设节点详情：名字 + 内容 + 可编辑。"""
+        card = self.db.get_user_card(uid) if uid else None
+        if not card:
+            self._toast("未绑定用户人设")
+            return
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("用户人设详情"),
+            content=ft.Text(
+                f"名字：{card['name']}\n\n{card['content']}",
+                size=13, selectable=True,
+            ),
+            actions=[
+                ft.TextButton(
+                    "编辑人设",
+                    on_click=lambda e: self._open_user_card_editor(uid),
+                ),
+                ft.TextButton("关闭", on_click=lambda e: self.page.pop_dialog()),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)
 
     def _open_relation_manager(self):
         role_cards = self.db.list_role_cards()

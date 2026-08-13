@@ -742,9 +742,49 @@ def main():
     assert center_name == "角色A"
     assert len(nodes) >= 3, nodes
     assert len(edges) >= 2, edges
-    viewer = app._build_relation_network(f"r{role_a_id}")
-    assert isinstance(viewer, ft.InteractiveViewer)
-    assert isinstance(viewer.content, ft.Stack)
+    net = app._build_relation_network(f"r{role_a_id}")
+    assert isinstance(net, ft.Container)
+    assert isinstance(net.content, ft.Stack)
+    # 节点 = Stack 里的 Container > GestureDetector > Row（可拖拽/可点开详情）
+    node_gds = [
+        c for c in net.content.controls
+        if isinstance(c, ft.Container)
+        and isinstance(c.content, ft.GestureDetector)
+        and isinstance(c.content.content, ft.Row)
+    ]
+    assert len(node_gds) == len(nodes), (len(node_gds), len(nodes))
+    # 画布背景手势层存在（空白处平移 / 捏合缩放）
+    bg_gds = [
+        c for c in net.content.controls
+        if isinstance(c, ft.GestureDetector) and isinstance(c.content, ft.Container)
+    ]
+    assert len(bg_gds) >= 1
+
+    # 手势：平移改 offset / 缩放夹 [0.3,3] / 拖拽改世界坐标 / 重置重布局
+    ox0 = app._map_view["ox"]
+    oy0 = app._map_view["oy"]
+    app._map_pan(types.SimpleNamespace(global_delta=ft.Offset(10, 5)))
+    assert app._map_view["ox"] == ox0 + 10, app._map_view
+    assert app._map_view["oy"] == oy0 + 5, app._map_view
+    app._map_scale_start(types.SimpleNamespace())
+    app._map_scale_update(types.SimpleNamespace(
+        scale=2.0, local_focal_point=ft.Offset(200, 260)))
+    assert 0.3 <= app._map_view["scale"] <= 3.0, app._map_view
+    before = app._map_positions[f"r{role_a_id}"]
+    app._map_drag_node(types.SimpleNamespace(global_delta=ft.Offset(20, 0)),
+                       f"r{role_a_id}")
+    after = app._map_positions[f"r{role_a_id}"]
+    assert after[0] != before[0], (before, after)
+    app._map_reset()
+    assert app._map_view is not None and app._map_view["scale"] > 0
+    assert f"r{role_a_id}" in app._map_positions
+
+    # 节点点开详情：用户人设 → 详情弹窗
+    app._open_user_details(user_card_id)
+    assert isinstance(pg.last_dialog, ft.AlertDialog)
+    assert pg.last_dialog.title.value == "用户人设详情"
+    app.page.pop_dialog()
+
     app._open_relation_manager()
     assert isinstance(pg.last_dialog, ft.AlertDialog)
     manager_texts = []
