@@ -742,6 +742,31 @@ def main():
     assert "仇敌" in sys_text, sys_text[:300]       # 最新关系已注入对话
     assert "好感度" in sys_text and "10" in sys_text, sys_text[:300]
 
+    # ---- 关系清单批量导入：按名匹配落库两表、未匹配跳过 ----
+    ra = db.create_role_card("清单角色A", "[核心]\n名字：清单角色A\n")
+    rb = db.create_role_card("清单角色B", "[核心]\n名字：清单角色B\n")
+    manifest = {
+        "world": "测试世界",
+        "relations": [
+            {"a": "清单角色A", "b": "清单角色B", "relation": "同门", "affection": 60},
+            {"a": "清单角色A", "b": "不存在角色", "relation": "敌对", "affection": 5},
+        ],
+        "user_relations": [
+            {"user": "我", "role": "清单角色A", "relation": "恋人", "affection": 120},
+        ],
+    }
+    n_imported, unmatched = db.import_relations(manifest)
+    assert n_imported == 2, (n_imported, unmatched)
+    assert unmatched == ["不存在角色"], unmatched
+    pair = db.get_character_relation(ra, rb)
+    assert pair and pair["relation"] == "同门" and pair["affection"] == 60, pair
+    me_id = next(u["id"] for u in db.list_user_cards() if u["name"] == "我")
+    pair_u = db.get_role_relation(me_id, ra)
+    assert pair_u and pair_u["relation"] == "恋人" and pair_u["affection"] == "120", pair_u
+    nodes, edges, _ = app._relation_network_data(f"r{ra}")
+    assert any(e["relation"] == "同门" for e in edges), edges
+    assert any(e["relation"] == "恋人" for e in edges), edges
+
     db.set_role_autonomy(role_a_id, 80)
     assert db.get_role_card(role_a_id)["autonomy"] == 80
     assert "自主性：高" in ai_client.build_autonomy_rule(80)

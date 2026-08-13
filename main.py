@@ -64,7 +64,7 @@ from models import DATA_DIR, Database, fmt_deadline, get_quotes, next_deadline, 
 from notifications import Notifier, SYSTEM_NOTIFY_OK, notify
 
 APP_NAME = "天野陽菜"
-APP_VERSION = "v1.8.18"     # 每次构建手动递增，便于确认手机上是哪个包
+APP_VERSION = "v1.8.19"     # 每次构建手动递增，便于确认手机上是哪个包
 
 
 def _affection_int(value):
@@ -1582,6 +1582,42 @@ class TaskApp:
         )
         self.page.show_dialog(dlg)
 
+    async def _import_relations(self):
+        """从关系清单 .json 批量导入角色↔角色 / 用户↔角色关系（按名字匹配）。"""
+        self.page.pop_dialog()
+        try:
+            files = await self.file_picker.pick_files(
+                dialog_title="导入关系清单",
+                allowed_extensions=["json"],
+            )
+        except Exception as ex:
+            self._toast(f"选择失败：{ex}")
+            return
+        if not files:
+            self._toast("已取消")
+            return
+        fp = files[0]
+        try:
+            text = None
+            b = getattr(fp, "bytes", None)
+            if b:
+                text = b.decode("utf-8", "replace")
+            elif getattr(fp, "path", None):
+                with open(fp.path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            if not text:
+                raise ValueError("文件为空")
+            manifest = json.loads(text)
+            imported, unmatched = self.db.import_relations(manifest)
+            if unmatched:
+                self._toast(
+                    f"已导入 {imported} 条关系；未匹配：{'、'.join(unmatched[:5])}"
+                )
+            else:
+                self._toast(f"已导入 {imported} 条关系")
+        except Exception as ex:
+            self._toast(f"导入失败：{ex}")
+
     def _open_relation_manager(self):
         role_cards = self.db.list_role_cards()
         user_cards = self.db.list_user_cards()
@@ -1738,6 +1774,10 @@ class TaskApp:
                     ),
                 ),
                 ft.TextButton("删除关系", on_click=_delete_relation),
+                ft.TextButton(
+                    "导入关系清单",
+                    on_click=lambda e: self.page.run_task(self._import_relations),
+                ),
                 ft.FilledButton(content="保存关系", on_click=_save),
             ],
             actions_alignment=ft.MainAxisAlignment.END,

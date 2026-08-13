@@ -1029,6 +1029,55 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def import_relations(self, manifest):
+        """按名字匹配，把关系清单导入 ai_character_relations / ai_role_relations。
+
+        返回 (导入条数, 未匹配名字列表)。关系必须已在角色卡/用户卡里存在（按名匹配）。
+        """
+        role_by_name = {c["name"]: c["id"] for c in self.list_role_cards()}
+        user_by_name = {u["name"]: u["id"] for u in self.list_user_cards()}
+        imported = 0
+        unmatched = []
+
+        def _note_unmatched(n):
+            if n and n not in role_by_name and n not in unmatched:
+                unmatched.append(n)
+
+        for r in manifest.get("relations", []):
+            a, b = r.get("a"), r.get("b")
+            aid, bid = role_by_name.get(a), role_by_name.get(b)
+            if aid is None or bid is None:
+                _note_unmatched(a)
+                _note_unmatched(b)
+                continue
+            self.save_character_relation(
+                aid, bid, r.get("relation", ""), self._affection_str(r.get("affection"))
+            )
+            imported += 1
+
+        for r in manifest.get("user_relations", []):
+            uname = (r.get("user") or "我").strip()
+            role = r.get("role")
+            rid = role_by_name.get(role) if role else None
+            if rid is None:
+                _note_unmatched(role)
+                continue
+            uid = user_by_name.get(uname)
+            if uid is None:
+                # 没有匹配的用户人设卡时，用/建共享默认「我」卡
+                uid = user_by_name.get("我")
+                if uid is None:
+                    uid = self.create_user_card(
+                        "我", "默认用户人设。与各角色的关系单独记录。"
+                    )
+                    user_by_name["我"] = uid
+            self.save_role_relation(
+                uid, rid, r.get("relation", ""), self._affection_str(r.get("affection"))
+            )
+            imported += 1
+
+        return imported, list(dict.fromkeys(unmatched))
+
     def list_ai_sessions(self):
         with self._conn() as c:
             rows = c.execute(
